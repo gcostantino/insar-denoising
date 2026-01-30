@@ -30,7 +30,7 @@ class MultiTaskLoss(nn.Module):
         mask_target, regress_target = target
         mask_output, regress_output = pred
 
-        total_loss = torch.zeros((), device=regress_target.device, dtype=regress_target.dtype)
+        total_loss = torch.zeros((), device=regress_target.device, dtype=regress_target.dtype, requires_grad=True)
 
         if self.lambda_bce > 0.:
             mask_loss = self.bce_loss(mask_output, mask_target)
