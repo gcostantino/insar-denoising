@@ -8,8 +8,10 @@ import os
 
 from config.datagen_params import N, Nt
 from config.insardenoiser_config import InSARDenoiserConfig, InSARDenoiserModelConfig
+from kito import Pipeline
 from kito.config.moduleconfig import TrainingConfig, PreprocessingStepConfig, WorkDirConfig, DataConfig, CallbacksConfig
 from kito.losses import LossRegistry
+#from losses import multitask_loss
 
 # ************************************** work-directory-related parameters  *******************************************#
 work_directory = os.path.join('/', 'data', 'giuseppe', 'insar-denoising')
@@ -25,7 +27,7 @@ num_train_samples = 100_000  # 1_000_100 # 100_500  # 4_000_500  # 100_500  # us
 train_verbosity_level = 2
 val_verbosity_level = 2
 test_verbosity_level = 2
-train_mode = False  # set to False in case of inference
+train_mode = True  # set to False in case of inference
 distributed_training = False
 
 # ****************************************** model-related parameters  ************************************************#
@@ -100,8 +102,19 @@ if masking_pre_text:
                                                               'max_square_size': 64}))
 
 if multi_task:
-    loss = LossRegistry.create('multi_task_loss')
-
+    '''from kito.losses import get_loss
+    loss = get_loss({'name':'multi_task_loss', 'lambda_ssim':structural_similarity_loss_weight,
+                               'lambda_bce':mask_loss_weight, 'lambda_l2':reconstruction_loss_weight})'''
+    '''loss = LossRegistry.create('multi_task_loss', lambda_ssim=structural_similarity_loss_weight,
+                               lambda_bce=mask_loss_weight, lambda_l2=reconstruction_loss_weight)'''
+    loss = {
+        'name': 'multi_task_loss',
+        'params': {
+            'lambda_ssim': structural_similarity_loss_weight,
+            'lambda_bce': mask_loss_weight,
+            'lambda_l2': reconstruction_loss_weight
+        }
+    }
 
 denoiser_configuration = InSARDenoiserConfig(
     training=TrainingConfig(
