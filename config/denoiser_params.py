@@ -9,6 +9,7 @@ import os
 from config.datagen_params import N, Nt
 from config.insardenoiser_config import InSARDenoiserConfig, InSARDenoiserModelConfig
 from kito.config.moduleconfig import TrainingConfig, PreprocessingStepConfig, WorkDirConfig, DataConfig, CallbacksConfig
+from kito.losses import LossRegistry
 
 # ************************************** work-directory-related parameters  *******************************************#
 work_directory = os.path.join('/', 'data', 'giuseppe', 'insar-denoising')
@@ -97,6 +98,10 @@ if masking_pre_text:
     preprocessing_config_list.append(PreprocessingStepConfig('fill_the_gaps_pretext',
                                                              {'masking_proba': .5, 'min_square_size': 8,
                                                               'max_square_size': 64}))
+
+if multi_task:
+    loss = LossRegistry.create('multi_task_loss')
+
 
 denoiser_configuration = InSARDenoiserConfig(
     training=TrainingConfig(
