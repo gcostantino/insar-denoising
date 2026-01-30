@@ -80,23 +80,28 @@ class InSARDenoiser(KitoModule):
                                           regress_all_noise_sources=self.regress_all_noise_sources,
                                           supervise_stratified_turbulent=self.supervise_stratified_turbulent)
 
-    def _check_data_shape(self):
-        x, labels = self.train_loader.dataset[0]  # this won't work
+    def _check_data_shape(self, batch):
+        x, labels = batch
         data, topo = x
         if self.multi_task:
             mask, labels = labels
-            if (exp_lab_shape := (self.num_temporal_positions, self.img_size, self.img_size, 1)) != mask.shape:
-                raise ValueError(f"Mask shape does not match the expected shape: ({exp_lab_shape}).")
+            if (exp_lab_shape := (
+            self.batch_size, self.num_temporal_positions, self.img_size, self.img_size, 1)) != mask.shape:
+                raise ValueError(f"Mask shape {mask.shape} does not match the expected shape: ({exp_lab_shape}).")
         if self.regress_all_noise_sources:
             noise_sources, labels = labels
-            if (exp_lab_shape := (self.num_temporal_positions, self.img_size, self.img_size, 5)) != noise_sources.shape:
-                raise ValueError(f"Noise sources shape does not match the expected shape: ({exp_lab_shape}).")
-        if (exp_data_shape := (self.num_temporal_positions, self.img_size, self.img_size, 1)) != data.shape:
-            raise ValueError(f"Data shape does not match the expected shape: ({exp_data_shape}).")
-        if (exp_topo_shape := (1, self.img_size, self.img_size, 1)) != topo.shape:
-            raise ValueError(f"Topography shape does not match the expected shape: ({exp_topo_shape}).")
-        if (exp_lab_shape := (self.num_temporal_positions, self.img_size, self.img_size, 1)) != labels.shape:
-            raise ValueError(f"Labels shape does not match the expected shape: ({exp_lab_shape}).")
+            if (exp_lab_shape := (
+            self.batch_size, self.num_temporal_positions, self.img_size, self.img_size, 5)) != noise_sources.shape:
+                raise ValueError(
+                    f"Noise sources shape {noise_sources.shape} does not match the expected shape: ({exp_lab_shape}).")
+        if (exp_data_shape := (
+        self.batch_size, self.num_temporal_positions, self.img_size, self.img_size, 1)) != data.shape:
+            raise ValueError(f"Data shape {data.shape}does not match the expected shape: ({exp_data_shape}).")
+        if (exp_topo_shape := (self.batch_size, 1, self.img_size, self.img_size, 1)) != topo.shape:
+            raise ValueError(f"Topography shape {topo.shape} does not match the expected shape: ({exp_topo_shape}).")
+        if (exp_lab_shape := (
+        self.batch_size, self.num_temporal_positions, self.img_size, self.img_size, 1)) != labels.shape:
+            raise ValueError(f"Labels shape {labels.shape} does not match the expected shape: ({exp_lab_shape}).")
 
 
 '''class InSARDenoiser2(BaseModule):
@@ -125,9 +130,27 @@ class InSARDenoiser(KitoModule):
 
 if __name__ == '__main__':
     from config.denoiser_params import denoiser_configuration
+    from kito.losses import get_loss, LossRegistry
+    from losses import multitask_loss
 
+    print("Checking registration:")
+    print(f"  'multi_task_loss' registered: {LossRegistry.is_registered('multi_task_loss')}")
+    print(f"  'ssim' registered: {LossRegistry.is_registered('ssim')}")
+    print(f"  'bce_with_logits' registered: {LossRegistry.is_registered('bce_with_logits')}")
+    print(f"  'mse' registered: {LossRegistry.is_registered('mse')}")
+
+    # Create loss
+    loss = LossRegistry.create('multi_task_loss',
+                               lambda_ssim=0.1,
+                               lambda_bce=1.0,
+                               lambda_l2=1.0)
+    print(f"\n✅ Created loss: {loss}")
+
+    # Test forward pass
+
+    exit(0)
     denoiser = InSARDenoiser(denoiser_configuration)
 
     engine = Engine(denoiser, denoiser_configuration)
     exit(0)
-    #engine.fit()
+    # engine.fit()
