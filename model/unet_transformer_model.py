@@ -78,10 +78,9 @@ class UNetDecoder(nn.Module):
 
 class UNetTransformerModel(nn.Module):
     def __init__(self, num_temporal_positions, enc_conv_dropout_rate, dec_conv_dropout_rate, transformer_dropout_rate,
-                 max_encoder_features=128, n_attention_heads=4, segmentation=False, multi_task=False,
+                 max_encoder_features=128, n_attention_heads=4, multi_task=False,
                  regress_all_noise_sources=False, supervise_stratified_turbulent=False):
         super().__init__()
-        self.segmentation = segmentation
         self.multi_task = multi_task
         self.regress_all_noise_sources = regress_all_noise_sources
         self.supervise_stratified_turbulent = supervise_stratified_turbulent

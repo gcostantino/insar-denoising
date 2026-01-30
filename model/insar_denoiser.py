@@ -1,13 +1,14 @@
 import torch
 
+from config.insardenoiser_config import InSARDenoiserConfig
 from kito import KitoModule, Engine
-
-from kito.config.moduleconfig import KitoModuleConfig, TrainingConfig, DataConfig, ModelConfig, WorkDirConfig, CallbacksConfig
+from kito.config.moduleconfig import KitoModuleConfig, TrainingConfig, DataConfig, ModelConfig, WorkDirConfig, \
+    CallbacksConfig
 from model.unet_transformer_model import UNetTransformerModel
 
 
 class InSARDenoiser(KitoModule):
-    def __init__(self, config: KitoModuleConfig = None):
+    def __init__(self, config: InSARDenoiserConfig = None):
         super().__init__('InSARDenoiser', config)
 
         self.max_encoder_features = config.model.max_encoder_features
@@ -20,7 +21,6 @@ class InSARDenoiser(KitoModule):
         self.topography_size = config.model.topography_size
         self.img_size = config.model.img_size
         self.num_temporal_positions = config.model.num_temporal_positions
-        self.segmentation_task = config.model.segmentation_task
         self.multi_task = config.model.multi_task
         self.multi_loss = config.model.multi_loss
         self.regress_all_noise_sources = config.model.regress_all_noise_sources
@@ -68,12 +68,15 @@ class InSARDenoiser(KitoModule):
         params_for_optimizer = self.optimizer_params()
         self.optimizer = torch.optim.Adam(params=params_for_optimizer, lr=self.learning_rate)
 
+    def set_model_input_size(self, *args, **kwargs):
+        self.model_input_size = [self.input_data_size, self.topography_size]
+
     def build_inner_model(self, *args, **kwargs):
         self.model = UNetTransformerModel(self.num_temporal_positions, self.enc_conv_dropout_rate,
                                           self.dec_conv_dropout_rate, self.transformer_dropout_rate,
                                           max_encoder_features=self.max_encoder_features,
                                           n_attention_heads=self.n_attention_heads,
-                                          segmentation=self.segmentation_task, multi_task=self.multi_task,
+                                          multi_task=self.multi_task,
                                           regress_all_noise_sources=self.regress_all_noise_sources,
                                           supervise_stratified_turbulent=self.supervise_stratified_turbulent)
 
@@ -96,8 +99,7 @@ class InSARDenoiser(KitoModule):
             raise ValueError(f"Labels shape does not match the expected shape: ({exp_lab_shape}).")
 
 
-
-class InSARDenoiser2(BaseModule):
+'''class InSARDenoiser2(BaseModule):
     """Uses custom loss from registry + runtime customization."""
 
     def build_inner_model(self):
@@ -119,44 +121,13 @@ class InSARDenoiser2(BaseModule):
         if isinstance(self.loss, InSARPhaseLoss):
             return self.loss(pred, target, coherence=coherence)
         else:
-            return self.loss(pred, target)
+            return self.loss(pred, target)'''
+
 if __name__ == '__main__':
-    config = KitoModuleConfig(
-        training=TrainingConfig(
-            learning_rate=1e-3,
-            n_train_epochs=5,
-            batch_size=32,
-            train_mode=True,
-            device_type="cuda"
-        ),
-        model=ModelConfig(
-            input_data_size=(3, 64, 64),
-            loss='cross_entropy_loss',
-            save_model_weights=True,
-            train_codename='random_image_demo'
-        ),
-        data=DataConfig(
-            dataset_type='random_images',
-            total_samples=1000,
-            train_ratio=0.8,
-            val_ratio=0.1,
-            num_workers=0
-        ),
-        workdir=WorkDirConfig(
-            work_directory='./outputs'
-        ),
-        callbacks=CallbacksConfig(
-            checkpoint_verbose=False,
-            checkpoint_monitor='train_loss',
-            tensorboard_histogram_freq=10,
-            enable_tensorboard=True,
-            tensorboard_images=True,
-            tensorboard_batch_indices=[0, 1, 2]  # Plot 3 batches
-        )
-    )
+    from config.denoiser_params import denoiser_configuration
 
-    denoiser = InSARDenoiser('InSARDenoiser')
+    denoiser = InSARDenoiser(denoiser_configuration)
+
+    engine = Engine(denoiser, denoiser_configuration)
     exit(0)
-    engine = Engine(denoiser, config)
-    engine.fit()
-
+    #engine.fit()
