@@ -13,6 +13,19 @@ class MultiTaskLoss(nn.Module):
         self.lambda_bce = lambda_bce
         self.lambda_l2 = lambda_l2
 
+        self.bce_loss = None
+        self.mse_loss = None
+        self.ssim_loss = None
+
+        if self.lambda_bce > 0.:
+            self.bce_loss = LossRegistry.create('BCEWithLogitsLoss')
+
+        if self.lambda_l2 > 0.:
+            self.mse_loss = LossRegistry.create('L2')
+
+        if self.lambda_ssim > 0.:
+            self.ssim_loss = LossRegistry.create('ssim')
+
     def forward(self, pred, target):
         mask_target, regress_target = target
         mask_output, regress_output = pred
@@ -20,12 +33,12 @@ class MultiTaskLoss(nn.Module):
         total_loss = torch.zeros((), device=regress_target.device, dtype=regress_target.dtype)
 
         if self.lambda_bce > 0.:
-            mask_loss = get_loss('BCEWithLogitsLoss')(mask_output, mask_target)
+            mask_loss = self.bce_loss(mask_output, mask_target)
             total_loss += self.lambda_bce * mask_loss
         if self.lambda_l2 > 0.:
-            reconstruction_loss = get_loss('L2')(regress_output, regress_target)
+            reconstruction_loss = self.mse_loss(regress_output, regress_target)
             total_loss += self.lambda_l2 * reconstruction_loss
         if self.lambda_ssim > 0.:
-            loss_ssim = get_loss('ssim')(regress_output, regress_target)
+            loss_ssim = self.ssim_loss(regress_output, regress_target)
             total_loss += self.lambda_ssim * loss_ssim
         return total_loss
