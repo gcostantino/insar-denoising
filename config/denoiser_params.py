@@ -6,6 +6,7 @@ as they are associated with structural properties of the methods and should not 
 
 import os
 
+from callbacks.insar_image_plotter import InSARTimeSeriesPlotter
 from config.datagen_params import N, Nt
 from config.insardenoiser_config import InSARDenoiserConfig, InSARDenoiserModelConfig
 from kito import Pipeline
@@ -41,10 +42,10 @@ input_data_size = (num_temporal_positions, img_size, img_size, 1)
 topography_size = (1, img_size, img_size, 1)
 tensorboard_img_id = 'denoising'
 loss = 'mean_squared_error'  # name of a loss registered in the LossRegistry
-save_model_weights = False
-log_to_tensorboard = False
-text_logging = False
-csv_logging = False
+save_model_weights = True
+log_to_tensorboard = True
+text_logging = True
+csv_logging = True
 initialize_model_with_weights = True  # the model will be initialized with the weights found at {weight_load_path}
 train_codename = f'train_unet_transf_bs{batch_size}_lr{learning_rate}_{weight_decay}wd_500Ksamp_128model_ResConv_normtopo_unet_{enc_conv_dropout_rate}dropout_curriculum_v2.1_stage4_sub1st_MSE0.1_BCE_multitask'  # codename for saving files and ID training
 batch_idx_viz = [i for i in range(20)]  # idx of samples in a random batch to visualize in TensorBoard
@@ -178,6 +179,7 @@ denoiser_configuration = InSARDenoiserConfig(
         tensorboard_images=True,
         tensorboard_image_freq=1,
         tensorboard_batch_indices=batch_idx_viz,
+        image_plotter_class=InSARTimeSeriesPlotter,
     ),
     data=DataConfig(
         dataset_type='H5InSARDataset',  # name of a registered dataset
