@@ -19,5 +19,4 @@ if __name__ == '__main__':
 
     pipeline.setup()
 
-    batch_idx = denoiser_configuration.model.batch_idx_viz
     engine.fit(data_pipeline=pipeline)
