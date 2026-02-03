@@ -6,6 +6,8 @@ from kito.config.moduleconfig import ModelConfig, KitoModuleConfig
 
 @dataclass
 class InSARDenoiserModelConfig(ModelConfig):
+    module_name: str = 'InSARDenoiser'
+
     max_encoder_features: int = 512
     n_attention_heads: int = 8
     transformer_dropout_rate: float = 0.1
