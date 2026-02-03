@@ -128,7 +128,7 @@ denoiser_configuration = InSARDenoiserConfig(
         val_verbosity_level=val_verbosity_level,
         test_verbosity_level=test_verbosity_level,
         distributed_training=distributed_training,
-        master_gpu_id=chosen_gpu_id,
+        device_id=chosen_gpu_id,
         initialize_model_with_saved_weights=initialize_model_with_weights,
         device_type=device_type,
     ),
