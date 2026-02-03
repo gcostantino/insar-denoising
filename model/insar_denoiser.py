@@ -9,7 +9,7 @@ from model.unet_transformer_model import UNetTransformerModel
 
 class InSARDenoiser(KitoModule):
     def __init__(self, config: InSARDenoiserConfig = None):
-        super().__init__('InSARDenoiser', config)
+        super().__init__(config)
 
         self.max_encoder_features = config.model.max_encoder_features
         self.n_attention_heads = config.model.n_attention_heads
