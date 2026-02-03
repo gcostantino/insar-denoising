@@ -4,7 +4,7 @@ Source code for the paper "Denoising of InSAR time series through spatiotemporal
 > Costantino G. & Jolivet R.: Denoising of InSAR time series through spatiotemporal attentive convolutional U-Net, in review.
 
 
-The code is based on the **pytorch-kito** package, so please install it before using this source code:
+The code is based on the **pytorch-kito** package ([repo](https://github.com/gcostantino/kito), [docs](https://kito.readthedocs.io/en/latest/?badge=latest)), so be sure it is installed before using this source code:
 
 ```bash
 pip install pytorch-kito
