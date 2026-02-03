@@ -51,7 +51,7 @@ class InSARDenoiser(KitoModule):
     def compute_loss(self, data_pair, y_pred, **kwargs):
         if self.multi_task or self.regress_all_noise_sources:
             target_tensors = self.send_data_to_device(data_pair[1])
-            return self.apply_loss(target_tensors, y_pred, **kwargs)
+            return self.apply_loss(y_pred, target_tensors, **kwargs)
         else:
             return super().compute_loss(data_pair, y_pred, **kwargs)
 
