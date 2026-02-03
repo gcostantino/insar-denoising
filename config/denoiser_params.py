@@ -12,7 +12,8 @@ from config.insardenoiser_config import InSARDenoiserConfig, InSARDenoiserModelC
 from kito import Pipeline
 from kito.config.moduleconfig import TrainingConfig, PreprocessingStepConfig, WorkDirConfig, DataConfig, CallbacksConfig
 from kito.losses import LossRegistry
-#from losses import multitask_loss
+
+# from losses import multitask_loss
 
 # ************************************** work-directory-related parameters  *******************************************#
 work_directory = os.path.join('/', 'data', 'giuseppe', 'insar-denoising')
@@ -134,6 +135,7 @@ denoiser_configuration = InSARDenoiserConfig(
     ),
 
     model=InSARDenoiserModelConfig(
+        module_name='InSARDenoiser',
         input_data_size=input_data_size,
         loss=loss,
         train_codename=train_codename,
