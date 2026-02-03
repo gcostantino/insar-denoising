@@ -19,7 +19,7 @@ class InSARDenoiserModelConfig(ModelConfig):
     multi_loss: bool = False
     supervise_stratified_turbulent: bool = False
     freeze_encoder: bool = False
-    subtract_first_frame: bool = False
+    # subtract_first_frame: bool = False
 
     mask_loss_weight: float = 1.0
     structural_similarity_loss_weight: float = 0.0
