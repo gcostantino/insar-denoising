@@ -34,7 +34,7 @@ class InSARDenoiserModelConfig(ModelConfig):
 @dataclass
 class InSARDenoiserConfig(KitoModuleConfig):
     """
-    Base configuration container for KitoModule.
+    Base configuration container for InSARDenoiser.
 
     Contains all configuration sections:
     - training: Training parameters
