@@ -41,6 +41,7 @@ class InSARDenoiserConfig(KitoModuleConfig):
     - model: Model architecture and settings
     - workdir: Output directories
     - data: Dataset and preprocessing
+    - callbacks: Callback handling
     """
     model: InSARDenoiserModelConfig = field(default_factory=InSARDenoiserModelConfig)
     # all other fields are inherited
