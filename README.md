@@ -13,6 +13,9 @@ pip install pytorch-kito
 ---
 ## Basic usage
 
+> Kito implements a mechanism of auto-discovery of loss functions and data preprocessing strategies, by scanning
+> the `./losses/` and `./preprocessing/` packages. Do not forget to check if they are in the project root!
+
 Everything you need is in `config/denoiser_params.py`. This python scripts creates the configuration of InSARDenoiser,
 which follows the following structure:
 
