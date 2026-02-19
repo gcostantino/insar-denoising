@@ -133,11 +133,18 @@ engine.predict(data_pipeline=pipeline)
 ### Applying InSARDenoiser on real data (cf. `ismetpasa_denoising.py`)
 ```python
 # suppose x, y and topo are available
-# x: InSAR time series
-# y: ground truth, if available
+# x: InSAR time series. The shape of x must be (time, height, width)
+# y: ground truth, (usually not available for real datasets, so set y=None). You can set y=x also (y is never used anyways)
 # topo: topography (must have the same height/width dimension as x)
 # x, y, topo must fit in memory to use InSARMemDataset, otherwise create a H5InSARDataset
-dataset = InSARMemDataset(x=x, y=y, topo=topo)
+
+topo = (topo - np.nanmin(topo)) / (np.nanmax(topo) - np.nanmin(topo))  # do not forget to normalize the topography!
+
+data, topo = data[None, ..., None], topo[None, None, ..., None]  # here, we add empty dimensions
+# at the end, x will have shape (1, N_t, N, N, 1) and topo (1, 1, N, N, 1),
+# where N is the image dimension (here, 128), and N_t is the temporal dimension (here, 9 frames)
+
+dataset = InSARMemDataset(x=x, y=None, topo=topo)
 pipeline = GenericDataPipeline(
     config=denoiser_configuration,
     dataset=dataset,
