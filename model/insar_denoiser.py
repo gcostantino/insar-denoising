@@ -127,30 +127,3 @@ class InSARDenoiser(KitoModule):
             return self.loss(pred, target, coherence=coherence)
         else:
             return self.loss(pred, target)'''
-
-if __name__ == '__main__':
-    from config.denoiser_params import denoiser_configuration
-    from kito.losses import get_loss, LossRegistry
-    from losses import multitask_loss
-
-    print("Checking registration:")
-    print(f"  'multi_task_loss' registered: {LossRegistry.is_registered('multi_task_loss')}")
-    print(f"  'ssim' registered: {LossRegistry.is_registered('ssim')}")
-    print(f"  'bce_with_logits' registered: {LossRegistry.is_registered('bce_with_logits')}")
-    print(f"  'mse' registered: {LossRegistry.is_registered('mse')}")
-
-    # Create loss
-    loss = LossRegistry.create('multi_task_loss',
-                               lambda_ssim=0.1,
-                               lambda_bce=1.0,
-                               lambda_l2=1.0)
-    print(f"\n✅ Created loss: {loss}")
-
-    # Test forward pass
-
-    exit(0)
-    denoiser = InSARDenoiser(denoiser_configuration)
-
-    engine = Engine(denoiser, denoiser_configuration)
-    exit(0)
-    # engine.fit()
