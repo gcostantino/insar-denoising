@@ -134,7 +134,7 @@ engine.predict(data_pipeline=pipeline)
 ```python
 # suppose x, y and topo are available
 # x: InSAR time series. The shape of x must be (time, height, width)
-# y: ground truth, (usually not available for real datasets, so set y=None). You can set y=x also (y is never used anyways)
+# y: ground truth, (usually not available for real datasets, so set y=None). You can also set y=x (y is never used for inference anyways)
 # topo: topography (must have the same height/width dimension as x)
 # x, y, topo must fit in memory to use InSARMemDataset, otherwise create a H5InSARDataset
 
