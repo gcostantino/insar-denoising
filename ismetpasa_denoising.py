@@ -448,10 +448,14 @@ def make_plot(vel, lat, lon, data, pred, x0, x1, y0, y1, ismetpasa_lat, ismetpas
 
 
 def make_plot_3rows(vel, lat, lon, data, pred, x0, x1, y0, y1, ismetpasa_lat, ismetpasa_lon, np_creep_time, creep_data,
-                    nan_mask, lon_crop, lat_crop, datetimes):
+                    nan_mask, lon_crop, lat_crop, datetimes, norm_lims=None, save=True, linear_cbar=False, figsize=(16, 16),
+                    cbar_data_ticklabels=None, cbar_pred_ticklabels=None):
     # cmap = 'RdBu_r'
     cmap_data = scmap.roma_r
     cmap_pred = scmap.vik
+
+    cmap_data = cmap_pred
+
     # build quadrilateral from the actual pcolormesh cell corners
     pts = np.array([
         [lon[y0, x0], lat[y0, x0]],  # top-left
@@ -464,10 +468,10 @@ def make_plot_3rows(vel, lat, lon, data, pred, x0, x1, y0, y1, ismetpasa_lat, is
                    edgecolor='k', linewidth=1)
 
     # interval to highlight in creepmeter data
-    start_creep = np.datetime64('2015-05-27')
-    end_creep = np.datetime64('2018-04-11')
+    start_creep = datetimes[0]  # np.datetime64('2015-05-27')
+    end_creep = datetimes[-1]  # np.datetime64('2018-04-11')
 
-    fig = plt.figure(figsize=(16, 16))
+    fig = plt.figure(figsize=figsize)
 
     # ---- OUTER GRID: 2 vertical parts ----
     outer = fig.add_gridspec(nrows=2, ncols=1,
@@ -598,7 +602,8 @@ def make_plot_3rows(vel, lat, lon, data, pred, x0, x1, y0, y1, ismetpasa_lat, is
 
     data_to_plot = [data, pred]
     cmap_list = [cmap_data, cmap_pred]
-    norm_lims = [(-5., 5.), (-2., 1.)]
+    if norm_lims is None:
+        norm_lims = [(-5., 5.), (-2., 1.)]
 
     axes_bottom = []
     im_list = []
@@ -652,15 +657,29 @@ def make_plot_3rows(vel, lat, lon, data, pred, x0, x1, y0, y1, ismetpasa_lat, is
     cbar_row1 = fig.colorbar(im_list[1], cax=cax_row1)
     cbar_row1.set_label("LOS disp. [cm]")
 
-    plt.savefig('./ismetpasa_denoising.pdf',
-                bbox_inches='tight')
+    if linear_cbar:
+        cbar_row0.ax.set_yscale('linear')
+        if cbar_data_ticklabels:
+            cbar_row0.set_ticks([float(x) for x in cbar_data_ticklabels])
+            cbar_row0.set_ticklabels(cbar_data_ticklabels)
+
+        cbar_row1.ax.set_yscale('linear')
+        if cbar_pred_ticklabels:
+            cbar_row1.set_ticks([float(x) for x in cbar_pred_ticklabels])
+            cbar_row1.set_ticklabels(cbar_pred_ticklabels)
+
+    if save:
+        plt.savefig('./ismetpasa_denoising.pdf',
+                    bbox_inches='tight')
+    else:
+        return fig
 
 
 def predict(denoiser_configuration, x, y, topo):
     denoiser_configuration.data.total_samples = len(x)
     denoiser_configuration.training.batch_size = 1
-    denoiser_configuration.training.train_data_ratio = 0.
-    denoiser_configuration.training.val_data_ratio = 0.
+    denoiser_configuration.data.train_ratio = 0.
+    denoiser_configuration.data.val_ratio = 0.
 
     dataset = InSARMemDataset(x=x, y=y, topo=topo)
 
@@ -1348,7 +1367,8 @@ def surface_to_los(d_east, d_north, d_up, incidence_deg, heading_deg):
     return d_los
 
 
-def plot_transects_new(data, pred, lon, lat, point_lon, point_lat, np_creep_time, creep_data, creep_mask, datetimes):
+def plot_transects_new(data, pred, lon, lat, point_lon, point_lat, np_creep_time, creep_data, creep_mask, datetimes,
+                       ismetpasa_strike, vmin=-2., vmax=1., save=True):
     # select_transects(img_pred, lon, lat, point_lon, point_lat)
     segment = [[112, 42], [109, 107]]
     segment = [[100, 20], [104, 100]]
@@ -1387,7 +1407,7 @@ def plot_transects_new(data, pred, lon, lat, point_lon, point_lat, np_creep_time
     # -------------------------------------------------
     # LEFT: image with transects
     # -------------------------------------------------
-    norm = TwoSlopeNorm(vmin=-2., vcenter=0, vmax=1.)
+    norm = TwoSlopeNorm(vmin=vmin, vcenter=0, vmax=vmax)
 
     im = ax_left.imshow(
         img_pred,
@@ -1516,8 +1536,11 @@ def plot_transects_new(data, pred, lon, lat, point_lon, point_lat, np_creep_time
 
     # ax_prof.legend(loc='best', fontsize=8)
     # fig.tight_layout()
-    plt.savefig('./ismetpasa_transect.pdf',
-                bbox_inches='tight')
+    if save:
+        plt.savefig('./ismetpasa_transect.pdf',
+                    bbox_inches='tight')
+    else:
+        return fig
 
 
 if __name__ == '__main__':
@@ -1565,10 +1588,10 @@ if __name__ == '__main__':
     '''make_plot(velocity, lat, lon, data, pred, x0, x1, y0, y1, ismetpasa_lat, ismetpasa_lon, np_creep_time, creep_data,
               nan_mask, lon_crop, lat_crop, datetimes)'''
 
-    '''make_plot_3rows(velocity, lat, lon, data, pred, x0, x1, y0, y1, ismetpasa_lat, ismetpasa_lon, np_creep_time, creep_data,
-              nan_mask, lon_crop, lat_crop, datetimes)'''
+    make_plot_3rows(velocity, lat, lon, data, pred, x0, x1, y0, y1, ismetpasa_lat, ismetpasa_lon, np_creep_time, creep_data,
+              nan_mask, lon_crop, lat_crop, datetimes)
 
     # plot_transects(pred[-1])
 
     plot_transects_new(data, pred, lon_crop, lat_crop, ismetpasa_lon, ismetpasa_lat, np_creep_time, creep_data,
-                       creep_mask, datetimes)
+                       creep_mask, datetimes, ismetpasa_strike)
