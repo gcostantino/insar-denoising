@@ -26,6 +26,10 @@ class H5InSARDataset(H5Dataset):
         self._lazy_load()
         return (self.dataset_data[index], self.dataset_topo[index]), self.dataset_labels[index]
 
+    def __len__(self):
+        with h5py.File(self.file_path, "r") as f:
+            return len(f["data"])
+
     def __getstate__(self):
         state = self.__dict__.copy()
         # Remove HDF5 file handle and dataset references
