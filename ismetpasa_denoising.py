@@ -676,20 +676,20 @@ def make_plot_3rows(vel, lat, lon, data, pred, x0, x1, y0, y1, ismetpasa_lat, is
 
 
 def predict(denoiser_configuration, x, y, topo):
-    denoiser_configuration.data.total_samples = len(x)
+    '''denoiser_configuration.data.total_samples = len(x)
     denoiser_configuration.training.batch_size = 1
     denoiser_configuration.data.train_ratio = 0.
-    denoiser_configuration.data.val_ratio = 0.
+    denoiser_configuration.data.val_ratio = 0.'''
 
     dataset = InSARMemDataset(x=x, y=y, topo=topo)
 
-    pipeline = GenericDataPipeline(
+    '''pipeline = GenericDataPipeline(
         config=denoiser_configuration,
         dataset=dataset,
         preprocessing=denoiser_configuration.data.preprocessing,
     )
 
-    pipeline.setup()
+    pipeline.setup()'''
 
     denoiser_configuration.training.train_mode = False
     denoiser_configuration.model.save_inference_to_disk = False
@@ -699,7 +699,7 @@ def predict(denoiser_configuration, x, y, topo):
 
     engine.module.build()
     engine.load_weights(denoiser_configuration.model.weight_load_path)
-    prediction = engine.predict(data_pipeline=pipeline)
+    prediction = engine.predict(data=dataset) #prediction = engine.predict(data_pipeline=pipeline)
     return prediction
 
 
@@ -1589,9 +1589,9 @@ if __name__ == '__main__':
               nan_mask, lon_crop, lat_crop, datetimes)'''
 
     make_plot_3rows(velocity, lat, lon, data, pred, x0, x1, y0, y1, ismetpasa_lat, ismetpasa_lon, np_creep_time, creep_data,
-              nan_mask, lon_crop, lat_crop, datetimes)
+              nan_mask, lon_crop, lat_crop, datetimes, save=False);plt.show()
 
     # plot_transects(pred[-1])
 
     plot_transects_new(data, pred, lon_crop, lat_crop, ismetpasa_lon, ismetpasa_lat, np_creep_time, creep_data,
-                       creep_mask, datetimes, ismetpasa_strike)
+                       creep_mask, datetimes, ismetpasa_strike, save=False);plt.show()
