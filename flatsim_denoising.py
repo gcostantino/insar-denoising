@@ -18,7 +18,7 @@ from utils.space_time_reconstruction import denoise_series
 
 WVL, RMS_THRESH, ABS_THRESH, POSITIVE_AWAY = 55.5, 10., 300., True  # abs thresh, though it should depend on the TS
 
-DENOISE_CFG = dict(N=128, Nt=9, spatial_stride=8, t_stride=2, stat='median',
+DENOISE_CFG = dict(N=128, Nt=9, spatial_stride=128, t_stride=8, stat='median',
                    temporal_taper='hann', taper='hann', edge_trim=8,
                    min_valid_frac=0.0, anchor_weight=0.0, correct=True)
 
@@ -91,14 +91,6 @@ def build_master(out_dir, master_path):
                 continue
             rel = os.path.relpath(p, os.path.dirname(os.path.abspath(master_path)))
             m[os.path.relpath(p, out_dir)[:-3]] = h5py.ExternalLink(rel, '/')
-
-
-def denoise_and_reconstruct_3d(data, topo, nan_mask, engine, dsetcls=InSARInferenceDataset, N=128, Nt=9,
-                               spatial_stride=8, t_stride=8, stat='median', temporal_taper='hann', taper='hann'):
-    # (b) full series, one chosen configuration
-    U, info = denoise_series(data, topo, engine, dsetcls, mask=nan_mask, N=N, Nt=Nt, spatial_stride=spatial_stride,
-                             t_stride=t_stride, stat=stat, temporal_taper=temporal_taper, taper=taper)
-    return U
 
 
 if __name__ == '__main__':
