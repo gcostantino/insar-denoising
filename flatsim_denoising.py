@@ -18,7 +18,7 @@ from utils.space_time_reconstruction import denoise_series
 
 WVL, RMS_THRESH, ABS_THRESH, POSITIVE_AWAY = 55.5, 10., 300., True  # abs thresh, though it should depend on the TS
 
-DENOISE_CFG = dict(N=128, Nt=9, spatial_stride=512, t_stride=8, stat='median',
+DENOISE_CFG = dict(N=128, Nt=9, spatial_stride=128, t_stride=8, stat='median',
                    temporal_taper='hann', taper='hann', edge_trim=8,
                    min_valid_frac=0.0, anchor_weight=0.0, correct=True)
 
