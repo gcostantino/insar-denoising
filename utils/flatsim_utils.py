@@ -14,6 +14,19 @@ def _find(folder, pattern):
                                 f'folder contains: {sorted(os.listdir(folder))[:30]}')
     return m[0]
 
+def _find_any(folder, patterns):
+    """Try each pattern in order; return the first that matches exactly one file."""
+    if not os.path.isdir(folder):
+        raise FileNotFoundError(f'Folder not found: {folder}')
+    tried = {}
+    for pat in patterns:
+        m = sorted(glob.glob(os.path.join(folder, pat)))
+        tried[pat] = [os.path.basename(x) for x in m]
+        if len(m) == 1:
+            return m[0]
+    raise FileNotFoundError(f'No unique match in {folder}. Tried: {tried}. '
+                            f'Folder contains: {sorted(os.listdir(folder))[:30]}')
+
 
 def load_flatsim(base_dir, line, rms_thresh=10., abs_thresh_mm=300., wavelength_mm=55.5, positive_away=True):
     """line = 'region/NSBAS_TS-PKG_...'. Returns cube (T,ny,nx) in mm + auxiliary data."""
@@ -22,7 +35,8 @@ def load_flatsim(base_dir, line, rms_thresh=10., abs_thresh_mm=300., wavelength_
     aux = os.path.join(base_dir, region, product.replace('NSBAS_TS-PKG', 'NSBAS_DAUX-PKG', 1))
     sign = 1 if positive_away else -1
 
-    tsfile = _find(folder, 'CNES_DTs_radar_*_8rlks.tiff')
+    # tsfile = _find(folder, 'CNES_DTs_radar_*8rlks.tiff')
+    tsfile = _find_any(folder, ['CNES_DTs_radar_8rlks.tiff', 'CNES_DTs_radar_*_8rlks.tiff'])
     rmsfile = _find(folder, 'CNES_Net_radar_8rlks.tiff')
     timefile = os.path.join(folder, 'RMSdate.txt')
     lonlatfile = _find(aux, 'CNES_Lut_radar_8rlks.tiff')
