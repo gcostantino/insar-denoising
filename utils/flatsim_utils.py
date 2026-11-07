@@ -6,9 +6,12 @@ import tifffile
 
 
 def _find(folder, pattern):
+    if not os.path.isdir(folder):
+        raise FileNotFoundError(f'Folder not found: {folder}')
     m = sorted(glob.glob(os.path.join(folder, pattern)))
     if len(m) != 1:
-        raise FileNotFoundError(f'{pattern} in {folder}: {m}')
+        raise FileNotFoundError(f'{pattern} in {folder}: matches={m}; '
+                                f'folder contains: {sorted(os.listdir(folder))[:30]}')
     return m[0]
 
 
