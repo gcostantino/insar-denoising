@@ -50,6 +50,13 @@ def save_series(h5path, data, U, cfg, info, runtime_s):
         f['los'].attrs['bands'] = 'E, N, U components of the LOS unit vector (sign-adjusted)'
         for k, v in data['meta'].items():
             f.attrs[k] = v
+
+        for k in ('N', 'Nt', 'spatial_stride', 't_stride', 'stat', 'taper', 'temporal_taper',
+                  'edge_trim', 'min_valid_frac', 'anchor_weight', 'correct'):
+            v = cfg[k]
+            f.attrs[f'cfg_{k}'] = int(v) if isinstance(v, bool) else v
+        f.attrs['weights'] = str(denoiser_configuration.model.weight_load_path)
+
         f.attrs['denoiser_cfg'] = json.dumps(cfg, default=str)
         f.attrs['n_windows_per_chunk'] = info['n_windows']
         f.attrs['n_chunks'] = len(info['t_starts'])
@@ -69,11 +76,13 @@ def is_complete(h5path):
 
 def process_series(line, base_dir, out_dir, engine, dataset_cls, cfg=DENOISE_CFG, overwrite=False):
     region, product = os.path.split(line.strip())
-    h5path = os.path.join(out_dir, region, product + '_denoised.h5')
+    h5path = os.path.join(out_dir, region, product + '.h5')
     if not overwrite and is_complete(h5path):
         return 'skipped'
     t0 = time.time()
-    data = load_flatsim(base_dir, line)
+    data = load_flatsim(base_dir, line, rms_thresh=RMS_THRESH, abs_thresh_mm=ABS_THRESH,
+                        wavelength_mm=WVL, positive_away=POSITIVE_AWAY)
+
     if data['cube'].shape[0] < cfg['Nt']:
         return f'too short ({data["cube"].shape[0]} frames)'
     print(f'[{line.strip()}] cube {data["cube"].shape}, orbit {data["meta"]["orbit"]}')
@@ -101,7 +110,20 @@ if __name__ == '__main__':
     ap.add_argument('--out-dir', required=True)
     ap.add_argument('--shard', default='0/1', help='i/n: process lines i, i+n, ... (array jobs)')
     ap.add_argument('--overwrite', action='store_true')
+    ap.add_argument('--spatial-stride', type=int, default=128)
+    ap.add_argument('--temporal-stride', type=int, default=8)
+    ap.add_argument('--stat', choices=['mean', 'median'], default='median')
+    ap.add_argument('--spatial-taper', choices=['hann', 'none'], default='hann', help='spatial taper')
+    ap.add_argument('--temporal-taper', choices=['hann', 'uniform'], default='hann')
+
     a = ap.parse_args()
+
+    cfg = dict(DENOISE_CFG)
+    cfg.update(spatial_stride=a.spatial_stride, t_stride=a.temporal_stride, stat=a.stat,
+               taper=a.spatial_taper, temporal_taper=a.temporal_taper)
+
+    tag = f's{a.spatial_stride}_t{a.temporal_stride}_{a.stat}_{a.spatial_taper}-{a.temporal_taper}'
+    out_dir = os.path.join(a.out_dir, tag)
 
     denoiser_configuration.training.train_mode = False
     denoiser_configuration.model.save_inference_to_disk = False
@@ -113,12 +135,12 @@ if __name__ == '__main__':
 
     i, n = map(int, a.shard.split('/'))
     lines = [l.strip() for l in open(a.list) if l.strip()][i::n]
-    os.makedirs(a.out_dir, exist_ok=True)
+    os.makedirs(out_dir, exist_ok=True)
     for line in lines:
         try:
-            print(line, '->', process_series(line, a.base_dir, a.out_dir, engine,
-                                             InSARInferenceDataset, overwrite=a.overwrite))
+            print(line, '->', process_series(line, a.base_dir, out_dir, engine,
+                                             InSARInferenceDataset, cfg=cfg, overwrite=a.overwrite))
         except Exception:
-            with open(os.path.join(a.out_dir, f'errors_shard{i}.log'), 'a') as ef:
+            with open(os.path.join(out_dir, f'errors_shard{i}.log'), 'a') as ef:
                 ef.write(f'{line}\n{traceback.format_exc()}\n')
             print(line, '-> FAILED (see log)')
