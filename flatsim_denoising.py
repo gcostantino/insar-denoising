@@ -107,6 +107,7 @@ if __name__ == '__main__':
     ap.add_argument('--list', default=os.path.expanduser('~/Desktop/flatsim_product_names_folders.txt'))
     ap.add_argument('--base-dir', default='/Users/giuseppe/Documents/DATA/InSAR/FLATSIM')
     ap.add_argument('--device', default='cuda')
+    ap.add_argument('--cuda-idx', type=int, default=0)
     ap.add_argument('--out-dir', required=True)
     ap.add_argument('--shard', default='0/1', help='i/n: process lines i, i+n, ... (array jobs)')
     ap.add_argument('--overwrite', action='store_true')
