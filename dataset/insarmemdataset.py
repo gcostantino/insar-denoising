@@ -10,3 +10,6 @@ class InSARMemDataset(MemDataset):
 
     def _load_sample(self, index):
         return (self.x[index], self.topo[index]), self.y[index]
+
+    def __len__(self):
+        return len(self.x)
