@@ -112,6 +112,7 @@ if __name__ == '__main__':
     a = ap.parse_args()
 
     denoiser_configuration.training.train_mode = False
+    denoiser_configuration.model.inference_filename = None  # not sure I need it here
     # denoiser_configuration.model.save_inference_to_disk = False
     denoiser_configuration.training.device_type = a.device
 
