@@ -14,6 +14,7 @@ from scipy.ndimage import map_coordinates, gaussian_filter1d
 from scipy.optimize import curve_fit
 
 from config.local_denoiser_params import denoiser_configuration
+from dataset.insarinferencedataset import InSARInferenceDataset
 from dataset.insarmemdataset import InSARMemDataset
 from kito import GenericDataPipeline, Engine
 from model.insar_denoiser import InSARDenoiser
@@ -681,7 +682,8 @@ def predict(denoiser_configuration, x, y, topo):
     denoiser_configuration.data.train_ratio = 0.
     denoiser_configuration.data.val_ratio = 0.'''
 
-    dataset = InSARMemDataset(x=x, y=y, topo=topo)
+    # dataset = InSARMemDataset(x=x, y=y, topo=topo)
+    dataset = InSARInferenceDataset(x=x, topo=topo)  # works better with new version of pytorch-kito
 
     '''pipeline = GenericDataPipeline(
         config=denoiser_configuration,
