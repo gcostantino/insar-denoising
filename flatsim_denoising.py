@@ -129,6 +129,7 @@ if __name__ == '__main__':
     denoiser_configuration.training.train_mode = False
     denoiser_configuration.model.save_inference_to_disk = False
     denoiser_configuration.training.device_type = a.device
+    denoiser_configuration.training.device_id = a.cuda_idx
 
     engine = Engine(InSARDenoiser(denoiser_configuration), denoiser_configuration)  # built once
     engine.module.build()
