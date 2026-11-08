@@ -370,6 +370,7 @@ def denoise_series(cube, topo, engine, dataset_cls, mask=None, N=128, Nt=9,
     estimate_workload(static['shape'], T, N=N, Nt=Nt, spatial_stride=spatial_stride, t_stride=t_stride)
 
     t_loop = time.perf_counter()
+    K = len(t_starts)
     for k, t0 in enumerate(t_starts):
         pred, raw_rel = predict_chunk(static, filled, int(t0), Nt, engine, dataset_cls,
                                       raw_cube=raw_cube, max_windows_per_call=batch_windows,
