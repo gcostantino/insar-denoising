@@ -2,6 +2,53 @@ import numpy as np
 import scipy.sparse as sp
 from scipy.sparse.linalg import splu
 
+class LazyWindows:
+    """Array-like of shape (W, Nt, N, N, 1); crops one window per access, nothing precomputed."""
+    def __init__(self, cube, origins, N, t0, Nt):
+        self.cube, self.origins, self.N, self.t0, self.Nt = cube, origins, N, t0, Nt
+        self.shape = (len(origins), Nt, N, N, 1)
+        self.dtype = np.dtype(np.float32)
+        self.ndim = 5
+
+    def __len__(self):
+        return len(self.origins)
+
+    def __getitem__(self, i):
+        if isinstance(i, (int, np.integer)):
+            y, x = self.origins[i]
+            return self.cube[self.t0:self.t0 + self.Nt, y:y + self.N, x:x + self.N, None].copy()
+        idx = np.arange(len(self))[i]                        # slices / index arrays
+        return np.stack([self[int(j)] for j in idx])
+
+    def __array__(self, dtype=None, copy=None):
+        raise RuntimeError('LazyWindows must not be materialized: the dataset touched the full array')
+
+
+class LazyTopo:
+    """Array-like of shape (W, 1, N, N, 1); per-window min/max normalization on access."""
+    def __init__(self, topo2d, origins, N):
+        self.topo2d, self.origins, self.N = topo2d, origins, N
+        self.shape = (len(origins), 1, N, N, 1)
+        self.dtype = np.dtype(np.float32)
+        self.ndim = 5
+
+    def __len__(self):
+        return len(self.origins)
+
+    def __getitem__(self, i):
+        if isinstance(i, (int, np.integer)):
+            y, x = self.origins[i]
+            t = self.topo2d[y:y + self.N, x:x + self.N]
+            mn = np.nanmin(t)
+            rg = np.nanmax(t) - mn
+            t = np.nan_to_num((t - mn) / (rg if rg > 0 else 1.0))
+            return t[None, :, :, None].astype(np.float32)
+        idx = np.arange(len(self))[i]
+        return np.stack([self[int(j)] for j in idx])
+
+    def __array__(self, dtype=None, copy=None):
+        raise RuntimeError('LazyTopo must not be materialized')
+
 
 def _stat(name):
     return {'mean': np.nanmean, 'median': np.nanmedian}[name]
@@ -100,36 +147,38 @@ def temporal_system(T, Nt, t_starts, w, ridge=1e-9):
 
 
 def predict_chunk(static, filled, t0, Nt, engine, dataset_cls,
-                  raw_cube=None, batch_windows=2000):
-    """Batched inference into a preallocated array. Returns pred (W,Nt,N,N), raw_rel or None."""
+                  raw_cube=None, max_windows_per_call=None):
     o, N = static['origins'], static['N']
     W = len(o)
-    chunk = filled[t0:t0 + Nt]
-    pred = np.empty((W, Nt, N, N), np.float32)
 
-    for s in range(0, W, batch_windows):
-        e = min(s + batch_windows, W)
-        idx = np.arange(s, e)
-        frames = extract_windows(chunk, o[s:e], N)[..., None]
-        ds = dataset_cls(x=frames, topo=window_topo(static, idx))
+    def _predict(s, e):
+        ds = dataset_cls(x=LazyWindows(filled, o[s:e], N, t0, Nt),
+                         topo=LazyTopo(static['topo2d'], o[s:e], N))
         out = np.asarray(engine.predict(data=ds))
-        out = out[..., 0] if out.ndim == 5 else out
+        out = out[..., 0] if out.ndim == 5 else out        # contiguous view, no copy
         assert out.shape[0] == e - s, out.shape
-        pred[s:e] = out
-        del frames, ds, out
+        return np.asarray(out, dtype=np.float32)
+
+    if max_windows_per_call is None or max_windows_per_call >= W:
+        pred = _predict(0, W)
+    else:
+        pred = np.empty((W, Nt, N, N), np.float32)
+        for s in range(0, W, max_windows_per_call):
+            e = min(s + max_windows_per_call, W)
+            pred[s:e] = _predict(s, e)
 
     wm = static['wmask']
-    for k in range(W):  # in-place masking
+    for k in range(W):                                      # in-place masking
         pred[k][:, wm[k]] = np.nan
 
     raw_rel = None
     if raw_cube is not None:
         raw_rel = extract_windows(raw_cube[t0:t0 + Nt], o, N).astype(np.float32, copy=False)
-        first = raw_rel[:, :1].copy()
-        raw_rel -= first
+        raw_rel -= raw_rel[:, :1].copy()
         for k in range(W):
             raw_rel[k][:, wm[k]] = np.nan
     return pred, raw_rel
+
 
 
 def select_subset(prep, stride):
@@ -305,7 +354,7 @@ def denoise_series(cube, topo, engine, dataset_cls, mask=None, N=128, Nt=9,
 
     for k, t0 in enumerate(t_starts):
         pred, raw_rel = predict_chunk(static, filled, int(t0), Nt, engine, dataset_cls,
-                                      raw_cube, batch_windows)
+                                      raw_cube=raw_cube, max_windows_per_call=batch_windows)
         Y, info = stitch_chunk(static, pred, raw_rel, spatial_stride, **stitch_kw)
         del pred, raw_rel
         add_chunk(rhs, Y, int(t0), w)
