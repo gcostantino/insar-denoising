@@ -16,6 +16,8 @@ from model.insar_denoiser import InSARDenoiser
 from utils.flatsim_utils import load_flatsim
 from utils.space_time_reconstruction import denoise_series
 
+from utils.profiling import prof, log, configure, setup_logging
+
 WVL, RMS_THRESH, ABS_THRESH, POSITIVE_AWAY = 55.5, 10., 300., True  # abs thresh, though it should depend on the TS
 
 UNIT_SCALE = 0.1   # mm -> cm (InSARDenoiser units)
@@ -64,6 +66,7 @@ def save_series(h5path, data, U, cfg, info, runtime_s):
         f.attrs['n_windows_per_chunk'] = info['n_windows']
         f.attrs['n_chunks'] = len(info['t_starts'])
         f.attrs['runtime_s'] = runtime_s
+        f.attrs['profile'] = json.dumps(info.get('profile', {}))
         f.attrs['timestamp'] = dt.datetime.now().isoformat()
         f.attrs['complete'] = 1  # written last
     os.replace(tmp, h5path)
@@ -82,19 +85,31 @@ def process_series(line, base_dir, out_dir, engine, dataset_cls, cfg=DENOISE_CFG
     h5path = os.path.join(out_dir, region, product + '.h5')
     if not overwrite and is_complete(h5path):
         return 'skipped'
+    prof.reset()
     t0 = time.time()
-    data = load_flatsim(base_dir, line, rms_thresh=RMS_THRESH, abs_thresh_mm=ABS_THRESH,
-                        wavelength_mm=WVL, positive_away=POSITIVE_AWAY)
-
+    log(f'loading {line.strip()}')
+    with prof.section('load'):
+        data = load_flatsim(base_dir, line, rms_thresh=RMS_THRESH, abs_thresh_mm=ABS_THRESH,
+                            wavelength_mm=WVL, positive_away=POSITIVE_AWAY)
     if data['cube'].shape[0] < cfg['Nt']:
         return f'too short ({data["cube"].shape[0]} frames)'
-    print(f'[{line.strip()}] cube {data["cube"].shape}, orbit {data["meta"]["orbit"]}')
+    log(f'loaded in {time.time() - t0:.0f}s: cube {data["cube"].shape} '
+        f'({data["cube"].nbytes / 1e9:.1f} GB), orbit {data["meta"]["orbit"]}')
+
     data['cube'] *= UNIT_SCALE  # mm to cm, as InSARDenoiser wants cm
-    U, info = denoise_series(data['cube'], data['topo'], engine, dataset_cls,
-                             mask=data['mask'], verbose=verbose, **cfg)
+    with prof.section('denoise'):
+        U, info = denoise_series(data['cube'], data['topo'], engine, dataset_cls,
+                                 mask=data['mask'], verbose=verbose, **cfg)
     U /= UNIT_SCALE  # back to mm, so the saved units attribute stays correct
-    save_series(h5path, data, U, cfg, info, time.time() - t0)
+
+    info['profile'] = prof.as_dict()
+    log(f'saving {h5path}')
+    with prof.section('save'):
+        save_series(h5path, data, U, cfg, info, time.time() - t0)
+    prof.report()
+    log(f'done in {time.time() - t0:.0f}s, file {os.path.getsize(h5path) / 1e9:.2f} GB')
     return f'done in {time.time() - t0:.0f}s'
+
 
 
 def build_master(out_dir, master_path):
@@ -128,8 +143,15 @@ if __name__ == '__main__':
     ap.add_argument('--batch-windows', type=int, default=2048, help='batch windows')
     ap.add_argument('--batch-size-gpu', type=int, default=128, help='batch size of GPU')
     ap.add_argument('--inference-silent', action='store_true')
+    ap.add_argument('--profile', action='store_true', help='section timers + report')
+    ap.add_argument('--profile-memory', action='store_true', help='also log RSS per section')
+    ap.add_argument('--log-level', default='INFO', choices=['DEBUG', 'INFO', 'WARNING'])
+    ap.add_argument('--log-file', default=None)
 
     a = ap.parse_args()
+
+    setup_logging(a.log_level, a.log_file)
+    configure(profile=a.profile or None, track_memory=a.profile_memory)
 
     cfg = dict(DENOISE_CFG)
     cfg.update(spatial_stride=a.spatial_stride, t_stride=a.temporal_stride, stat=a.stat,
@@ -149,7 +171,7 @@ if __name__ == '__main__':
     denoiser_configuration.training.device_type = a.device
     denoiser_configuration.training.device_id = a.cuda_idx
     denoiser_configuration.training.batch_size = a.batch_size_gpu
-    
+
     '''denoiser_configuration.data.num_workers = 2
     denoiser_configuration.data.prefetch_factor = 2
     denoiser_configuration.data.pin_memory = True
