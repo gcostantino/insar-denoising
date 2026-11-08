@@ -147,14 +147,14 @@ def temporal_system(T, Nt, t_starts, w, ridge=1e-9):
 
 
 def predict_chunk(static, filled, t0, Nt, engine, dataset_cls,
-                  raw_cube=None, max_windows_per_call=None):
+                  raw_cube=None, max_windows_per_call=None, verbose=True):
     o, N = static['origins'], static['N']
     W = len(o)
 
     def _predict(s, e):
         ds = dataset_cls(x=LazyWindows(filled, o[s:e], N, t0, Nt),
                          topo=LazyTopo(static['topo2d'], o[s:e], N))
-        out = np.asarray(engine.predict(data=ds))
+        out = np.asarray(engine.predict(data=ds, verbose=verbose))
         out = out[..., 0] if out.ndim == 5 else out        # contiguous view, no copy
         assert out.shape[0] == e - s, out.shape
         return np.asarray(out, dtype=np.float32)
@@ -323,7 +323,7 @@ def estimate_workload(shape, T, N=128, Nt=9, spatial_stride=16, t_stride=2):
 def denoise_series(cube, topo, engine, dataset_cls, mask=None, N=128, Nt=9,
                    spatial_stride=16, t_stride=2, temporal_taper='hann',
                    min_valid_frac=0.0, fill_range=10., seed=0, keep_chunks=False,
-                   batch_windows=2000, **stitch_kw):
+                   batch_windows=2000, verbose=True, **stitch_kw):
     T = cube.shape[0]
     assert T >= Nt, f'Need at least {Nt} frames'
     assert 1 <= t_stride <= Nt - 1
@@ -354,7 +354,8 @@ def denoise_series(cube, topo, engine, dataset_cls, mask=None, N=128, Nt=9,
 
     for k, t0 in enumerate(t_starts):
         pred, raw_rel = predict_chunk(static, filled, int(t0), Nt, engine, dataset_cls,
-                                      raw_cube=raw_cube, max_windows_per_call=batch_windows)
+                                      raw_cube=raw_cube, max_windows_per_call=batch_windows,
+                                      verbose=verbose)
         Y, info = stitch_chunk(static, pred, raw_rel, spatial_stride, **stitch_kw)
         del pred, raw_rel
         add_chunk(rhs, Y, int(t0), w)
