@@ -1,9 +1,15 @@
+import time
+
 import numpy as np
 import scipy.sparse as sp
 from scipy.sparse.linalg import splu
 
+from utils.profiling import prof, log
+
+
 class LazyWindows:
     """Array-like of shape (W, Nt, N, N, 1); crops one window per access, nothing precomputed."""
+
     def __init__(self, cube, origins, N, t0, Nt):
         self.cube, self.origins, self.N, self.t0, self.Nt = cube, origins, N, t0, Nt
         self.shape = (len(origins), Nt, N, N, 1)
@@ -17,7 +23,7 @@ class LazyWindows:
         if isinstance(i, (int, np.integer)):
             y, x = self.origins[i]
             return self.cube[self.t0:self.t0 + self.Nt, y:y + self.N, x:x + self.N, None].copy()
-        idx = np.arange(len(self))[i]                        # slices / index arrays
+        idx = np.arange(len(self))[i]  # slices / index arrays
         return np.stack([self[int(j)] for j in idx])
 
     def __array__(self, dtype=None, copy=None):
@@ -26,6 +32,7 @@ class LazyWindows:
 
 class LazyTopo:
     """Array-like of shape (W, 1, N, N, 1); per-window min/max normalization on access."""
+
     def __init__(self, topo2d, origins, N):
         self.topo2d, self.origins, self.N = topo2d, origins, N
         self.shape = (len(origins), 1, N, N, 1)
@@ -91,6 +98,7 @@ def nan_all(cube):
     return m
 
 
+@prof.profiled('fill_nans')
 def fill_cube_inplace(cube, fill_range=10., seed=0):
     """Frame-by-frame fill of NaNs (cube must be float32 and writable)."""
     rng = np.random.default_rng(seed)
@@ -108,6 +116,7 @@ def fill_cube(cube, fill_range=10., seed=0):
     return filled
 
 
+@prof.profiled('prepare_static')
 def prepare_static(topo, mask, N, spatial_stride, min_valid_frac=0.0):
     ny, nx = mask.shape
     assert topo.shape == (ny, nx), (topo.shape, mask.shape)
@@ -131,6 +140,7 @@ def temporal_weights(Nt, kind='hann'):
     raise ValueError(kind)
 
 
+@prof.profiled('temporal_system')
 def temporal_system(T, Nt, t_starts, w, ridge=1e-9):
     """Normal matrix of: u(t_k+tau) - u(t_k) = Y_k(tau), with u(0)=0. Unknowns u(1..T-1)."""
     rows = []
@@ -146,6 +156,7 @@ def temporal_system(T, Nt, t_starts, w, ridge=1e-9):
     return B.T @ (wr[:, None] * B) + ridge * np.eye(T - 1)
 
 
+@prof.profiled('predict')
 def predict_chunk(static, filled, t0, Nt, engine, dataset_cls,
                   raw_cube=None, max_windows_per_call=None, verbose=True):
     o, N = static['origins'], static['N']
@@ -155,7 +166,7 @@ def predict_chunk(static, filled, t0, Nt, engine, dataset_cls,
         ds = dataset_cls(x=LazyWindows(filled, o[s:e], N, t0, Nt),
                          topo=LazyTopo(static['topo2d'], o[s:e], N))
         out = np.asarray(engine.predict(data=ds, verbose=verbose))
-        out = out[..., 0] if out.ndim == 5 else out        # contiguous view, no copy
+        out = out[..., 0] if out.ndim == 5 else out  # contiguous view, no copy
         assert out.shape[0] == e - s, out.shape
         return np.asarray(out, dtype=np.float32)
 
@@ -168,7 +179,7 @@ def predict_chunk(static, filled, t0, Nt, engine, dataset_cls,
             pred[s:e] = _predict(s, e)
 
     wm = static['wmask']
-    for k in range(W):                                      # in-place masking
+    for k in range(W):  # in-place masking
         pred[k][:, wm[k]] = np.nan
 
     raw_rel = None
@@ -180,7 +191,7 @@ def predict_chunk(static, filled, t0, Nt, engine, dataset_cls,
     return pred, raw_rel
 
 
-
+@prof.profiled('select_subset')
 def select_subset(prep, stride):
     """Windows of a coarser grid that are present in the cached fine grid."""
     ny, nx = prep['shape']
@@ -219,6 +230,7 @@ def stitch_chunk(static, pred, raw_rel, stride, stat='median', correct=True, tap
     return blend(p, c, origins, static['shape'], N, taper), info
 
 
+@prof.profiled('blend')
 def blend(pred, c, origins, out_shape, N, taper='hann'):
     T = pred.shape[1]
     H, Wd = out_shape
@@ -240,6 +252,7 @@ def blend(pred, c, origins, out_shape, N, taper='hann'):
     return out
 
 
+@prof.profiled('offsets')
 def estimate_offsets(pred, origins, gidx, N, stat='median', max_lag=3, min_overlap_frac=0.25,
                      edge_trim=8, min_pixels=200, raw=None, anchor_weight=0.0, ridge=1e-6):
     f = _stat(stat)
@@ -253,51 +266,54 @@ def estimate_offsets(pred, origins, gidx, N, stat='median', max_lag=3, min_overl
 
     rows, cols, vals, D, n_pix = [], [], [], [], []
     p = 0
-    for i, (iy, ix) in enumerate(gl):
-        yi, xi = origins[i]
-        for dy, dx in offs:
-            j = lookup.get((iy + dy, ix + dx))
-            if j is None:
-                continue
-            yj, xj = origins[j]
-            y0, y1 = max(yi, yj) + lo, min(yi, yj) + hi
-            x0, x1 = max(xi, xj) + lo, min(xi, xj) + hi
-            if y1 <= y0 or x1 <= x0 or (y1 - y0) * (x1 - x0) < min_overlap_frac * full_area:
-                continue
-            a = pred[i][:, y0 - yi:y1 - yi, x0 - xi:x1 - xi]
-            b = pred[j][:, y0 - yj:y1 - yj, x0 - xj:x1 - xj]
-            diff = (b - a).reshape(T, -1)
-            n = np.isfinite(diff[0]).sum()
-            if n < min_pixels:
-                continue
-            D.append(np.nan_to_num(f(diff, axis=1)))  # c_i - c_j = stat(pred_j - pred_i)
-            n_pix.append(n)
-            rows += [p, p]
-            cols += [i, j]
-            vals += [1., -1.]
-            p += 1
-    if p == 0:
-        raise RuntimeError('No valid overlapping pairs (check stride / min_pixels / mask).')
+    with prof.section('pairs'):
+        for i, (iy, ix) in enumerate(gl):
+            yi, xi = origins[i]
+            for dy, dx in offs:
+                j = lookup.get((iy + dy, ix + dx))
+                if j is None:
+                    continue
+                yj, xj = origins[j]
+                y0, y1 = max(yi, yj) + lo, min(yi, yj) + hi
+                x0, x1 = max(xi, xj) + lo, min(xi, xj) + hi
+                if y1 <= y0 or x1 <= x0 or (y1 - y0) * (x1 - x0) < min_overlap_frac * full_area:
+                    continue
+                a = pred[i][:, y0 - yi:y1 - yi, x0 - xi:x1 - xi]
+                b = pred[j][:, y0 - yj:y1 - yj, x0 - xj:x1 - xj]
+                diff = (b - a).reshape(T, -1)
+                n = np.isfinite(diff[0]).sum()
+                if n < min_pixels:
+                    continue
+                D.append(np.nan_to_num(f(diff, axis=1)))  # c_i - c_j = stat(pred_j - pred_i)
+                n_pix.append(n)
+                rows += [p, p]
+                cols += [i, j]
+                vals += [1., -1.]
+                p += 1
+        if p == 0:
+            raise RuntimeError('No valid overlapping pairs (check stride / min_pixels / mask).')
 
-    A = sp.csr_matrix((vals, (rows, cols)), shape=(p, W))
-    D = np.array(D)
-    w = np.array(n_pix, float)
-    w /= w.mean()
-    M = (A.T @ sp.diags(w) @ A).tocsc()
-    rhs = A.T @ (w[:, None] * D)
+    with prof.section('solve'):
+        A = sp.csr_matrix((vals, (rows, cols)), shape=(p, W))
+        D = np.array(D)
+        w = np.array(n_pix, float)
+        w /= w.mean()
+        M = (A.T @ sp.diags(w) @ A).tocsc()
+        rhs = A.T @ (w[:, None] * D)
 
-    if raw is not None and anchor_weight > 0:
-        a = f((raw - pred).reshape(W, T, -1), axis=2)
-        lam = anchor_weight * np.isfinite(a[:, 0])
-        M = M + sp.diags(lam)
-        rhs = rhs + lam[:, None] * np.nan_to_num(a)
+        if raw is not None and anchor_weight > 0:
+            a = f((raw - pred).reshape(W, T, -1), axis=2)
+            lam = anchor_weight * np.isfinite(a[:, 0])
+            M = M + sp.diags(lam)
+            rhs = rhs + lam[:, None] * np.nan_to_num(a)
 
-    c = splu((M + ridge * sp.eye(W)).tocsc()).solve(np.asarray(rhs))
+        c = splu((M + ridge * sp.eye(W)).tocsc()).solve(np.asarray(rhs))
     before = np.sqrt(np.mean(w[:, None] * D ** 2))
     after = np.sqrt(np.mean(w[:, None] * (A @ c - D) ** 2))
     return c, dict(n_pairs=p, rms_before=before, rms_after=after)
 
 
+@prof.profiled('accumulate')
 def add_chunk(rhs, Y, tk, w):
     """Accumulate B^T W Y for one chunk."""
     for tau in range(1, Y.shape[0]):
@@ -314,10 +330,10 @@ def estimate_workload(shape, T, N=128, Nt=9, spatial_stride=16, t_stride=2):
     n_chunks = len(_starts(T, Nt, t_stride))
     W = ny_w * nx_w
     mb_chunk = W * Nt * N * N * 4 / 1e6  # float32 frames for one chunk
-    print(f'spatial windows: {ny_w} x {nx_w} = {W}')
-    print(f'time chunks: {n_chunks} (Nt={Nt}, t_stride={t_stride})')
-    print(f'total crops to denoise: {W * n_chunks}')
-    print(f'~{mb_chunk / 1e3:.1f} GB per chunk for inputs (same again for predictions)')
+    log(f'spatial windows: {ny_w} x {nx_w} = {W}')
+    log(f'time chunks: {n_chunks} (Nt={Nt}, t_stride={t_stride})')
+    log(f'total crops to denoise: {W * n_chunks}')
+    log(f'~{mb_chunk / 1e3:.1f} GB per chunk for inputs (same again for predictions)')
 
 
 def denoise_series(cube, topo, engine, dataset_cls, mask=None, N=128, Nt=9,
@@ -331,6 +347,7 @@ def denoise_series(cube, topo, engine, dataset_cls, mask=None, N=128, Nt=9,
         mask = nan_all(cube)  # before any filling
     static = prepare_static(topo, mask, N, spatial_stride, min_valid_frac)
     H, W = static['shape']
+    nW = len(static['origins'])
 
     if stitch_kw.get('anchor_weight', 0.0) > 0:
         filled, raw_cube = fill_cube(cube, fill_range, seed), cube
@@ -346,12 +363,13 @@ def denoise_series(cube, topo, engine, dataset_cls, mask=None, N=128, Nt=9,
     infos, chunks = [], []
 
     n_grid = len(_starts(H, N, spatial_stride)) * len(_starts(W, N, spatial_stride))
-    print(f"windows per chunk: {len(static['origins'])} kept of {n_grid} "
-          f"({n_grid - len(static['origins'])} skipped as empty)")
-    print(f"chunks: {len(t_starts)} -> total crops to denoise: "
-          f"{len(static['origins']) * len(t_starts)}")
+    log(f"windows per chunk: {len(static['origins'])} kept of {n_grid} "
+        f"({n_grid - len(static['origins'])} skipped as empty)")
+    log(f"chunks: {len(t_starts)} -> total crops to denoise: "
+        f"{len(static['origins']) * len(t_starts)}")
     estimate_workload(static['shape'], T, N=N, Nt=Nt, spatial_stride=spatial_stride, t_stride=t_stride)
 
+    t_loop = time.perf_counter()
     for k, t0 in enumerate(t_starts):
         pred, raw_rel = predict_chunk(static, filled, int(t0), Nt, engine, dataset_cls,
                                       raw_cube=raw_cube, max_windows_per_call=batch_windows,
@@ -364,11 +382,20 @@ def denoise_series(cube, topo, engine, dataset_cls, mask=None, N=128, Nt=9,
         if keep_chunks:
             chunks.append(Y.astype(np.float32))
         del Y
-        print(f'chunk {k + 1}/{len(t_starts)} (t0={t0}): {info["n_windows"]} windows, '
-              f'rms {info.get("rms_before", np.nan):.3f} -> {info.get("rms_after", np.nan):.3f}')
 
-    u = np.tensordot(np.linalg.inv(M), rhs, axes=1)
-    U = np.concatenate([np.zeros((1, H, W)), u], axis=0)
-    U[:, bad] = np.nan
-    return U.astype(np.float32), dict(chunks=chunks, infos=infos, t_starts=t_starts,
-                                      n_windows=len(static['origins']))
+        eta = (time.perf_counter() - t_loop) / (k + 1) * (K - k - 1)
+        msg = (f'chunk {k + 1}/{K} (frames {t0}-{t0 + Nt - 1}) | {nW} windows | '
+               f'rms {info.get("rms_before", np.nan):.3f}->{info.get("rms_after", np.nan):.3f} | '
+               f'ETA {eta / 60:.1f} min')
+        if prof.enabled:
+            msg += (f' | predict {prof.get("predict"):.1f}s ({nW / prof.get("predict"):.0f} win/s)'
+                    f' | offsets {prof.get("offsets"):.1f}s | blend {prof.get("blend"):.1f}s')
+        log(msg)
+
+    log('temporal solve...')
+    with prof.section('temporal_solve'):
+        u = np.tensordot(np.linalg.inv(M), rhs, axes=1)
+        U = np.concatenate([np.zeros((1, H, W)), u], axis=0)
+        U[:, bad] = np.nan
+        U = U.astype(np.float32)
+    return U, dict(chunks=chunks, infos=infos, t_starts=t_starts, n_windows=nW)
