@@ -89,9 +89,10 @@ def process_series(line, base_dir, out_dir, engine, dataset_cls, cfg=DENOISE_CFG
     if data['cube'].shape[0] < cfg['Nt']:
         return f'too short ({data["cube"].shape[0]} frames)'
     print(f'[{line.strip()}] cube {data["cube"].shape}, orbit {data["meta"]["orbit"]}')
-    U, info = denoise_series(data['cube'] * UNIT_SCALE, data['topo'], engine, dataset_cls,
+    data['cube'] *= UNIT_SCALE  # mm to cm, as InSARDenoiser wants cm
+    U, info = denoise_series(data['cube'], data['topo'], engine, dataset_cls,
                              mask=data['mask'], **cfg)
-    U = U / UNIT_SCALE  # back to mm, so the saved units attribute stays correct
+    U /= UNIT_SCALE  # back to mm, so the saved units attribute stays correct
     save_series(h5path, data, U, cfg, info, time.time() - t0)
     return f'done in {time.time() - t0:.0f}s'
 
@@ -130,6 +131,10 @@ if __name__ == '__main__':
     cfg = dict(DENOISE_CFG)
     cfg.update(spatial_stride=a.spatial_stride, t_stride=a.temporal_stride, stat=a.stat,
                taper=a.spatial_taper, temporal_taper=a.temporal_taper)
+
+    max_stride = int(0.75 * (cfg['N'] - 2 * cfg['edge_trim']))  # 84 with defaults
+    if cfg['correct'] and a.spatial_stride > max_stride:
+        ap.error(f'--spatial-stride must be <= {max_stride} for the offset correction to have overlaps')
 
     tag = f'sstride{a.spatial_stride}_tstride{a.temporal_stride}_aggreg_{a.stat}_staper_{a.spatial_taper}-ttaper_{a.temporal_taper}'
     out_dir = os.path.join(a.out_dir, tag)
