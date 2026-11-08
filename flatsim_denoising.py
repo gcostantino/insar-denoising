@@ -2,6 +2,7 @@ import argparse
 import datetime as dt
 import glob
 import json
+import logging
 import os
 import time
 import traceback
@@ -14,13 +15,12 @@ from dataset.insarinferencedataset import InSARInferenceDataset
 from kito import Engine
 from model.insar_denoiser import InSARDenoiser
 from utils.flatsim_utils import load_flatsim
-from utils.space_time_reconstruction import denoise_series
-
 from utils.profiling import prof, log, configure, setup_logging
+from utils.space_time_reconstruction import denoise_series
 
 WVL, RMS_THRESH, ABS_THRESH, POSITIVE_AWAY = 55.5, 10., 300., True  # abs thresh, though it should depend on the TS
 
-UNIT_SCALE = 0.1   # mm -> cm (InSARDenoiser units)
+UNIT_SCALE = 0.1  # mm -> cm (InSARDenoiser units)
 
 DENOISE_CFG = dict(N=128, Nt=9, spatial_stride=64, t_stride=2, stat='median',
                    temporal_taper='hann', taper='hann', edge_trim=8,
@@ -111,7 +111,6 @@ def process_series(line, base_dir, out_dir, engine, dataset_cls, cfg=DENOISE_CFG
     return f'done in {time.time() - t0:.0f}s'
 
 
-
 def build_master(out_dir, master_path):
     """master.h5 exposing all complete series as region/product via external links."""
     with h5py.File(master_path, 'w') as m:
@@ -120,6 +119,7 @@ def build_master(out_dir, master_path):
                 continue
             rel = os.path.relpath(p, os.path.dirname(os.path.abspath(master_path)))
             m[os.path.relpath(p, out_dir)[:-3]] = h5py.ExternalLink(rel, '/')
+
 
 # example with 2 devices:
 # CUDA_VISIBLE_DEVICES=0 python flatsim_denoising.py --out-dir results --shard 0/2 &
@@ -153,7 +153,8 @@ if __name__ == '__main__':
     setup_logging(a.log_level, a.log_file)
     configure(profile=a.profile or None, track_memory=a.profile_memory)
 
-    batch_windows = None #a.batch_windows
+    batch_windows = a.batch_windows
+    logging.getLogger('kito.engine').setLevel(logging.WARNING)  # suppress InSARDenoiser prediction logs
 
     cfg = dict(DENOISE_CFG)
     cfg.update(spatial_stride=a.spatial_stride, t_stride=a.temporal_stride, stat=a.stat,
