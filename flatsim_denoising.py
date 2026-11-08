@@ -77,7 +77,7 @@ def is_complete(h5path):
         return False
 
 
-def process_series(line, base_dir, out_dir, engine, dataset_cls, cfg=DENOISE_CFG, overwrite=False):
+def process_series(line, base_dir, out_dir, engine, dataset_cls, cfg=DENOISE_CFG, overwrite=False, verbose=True):
     region, product = os.path.split(line.strip())
     h5path = os.path.join(out_dir, region, product + '.h5')
     if not overwrite and is_complete(h5path):
@@ -91,7 +91,7 @@ def process_series(line, base_dir, out_dir, engine, dataset_cls, cfg=DENOISE_CFG
     print(f'[{line.strip()}] cube {data["cube"].shape}, orbit {data["meta"]["orbit"]}')
     data['cube'] *= UNIT_SCALE  # mm to cm, as InSARDenoiser wants cm
     U, info = denoise_series(data['cube'], data['topo'], engine, dataset_cls,
-                             mask=data['mask'], verbose=(not cfg['inference_silent']), **cfg)
+                             mask=data['mask'], verbose=verbose, **cfg)
     U /= UNIT_SCALE  # back to mm, so the saved units attribute stays correct
     save_series(h5path, data, U, cfg, info, time.time() - t0)
     return f'done in {time.time() - t0:.0f}s'
@@ -133,8 +133,7 @@ if __name__ == '__main__':
 
     cfg = dict(DENOISE_CFG)
     cfg.update(spatial_stride=a.spatial_stride, t_stride=a.temporal_stride, stat=a.stat,
-               taper=a.spatial_taper, temporal_taper=a.temporal_taper, batch_windows=a.batch_windows,
-               inference_silent=a.inference_silent)
+               taper=a.spatial_taper, temporal_taper=a.temporal_taper, batch_windows=a.batch_windows)
 
     max_stride = int(0.75 * (cfg['N'] - 2 * cfg['edge_trim']))  # 84 with defaults
     if cfg['correct'] and a.spatial_stride > max_stride:
@@ -142,6 +141,8 @@ if __name__ == '__main__':
 
     tag = f'sstride{a.spatial_stride}_tstride{a.temporal_stride}_aggreg_{a.stat}_staper_{a.spatial_taper}-ttaper_{a.temporal_taper}'
     out_dir = os.path.join(a.out_dir, tag)
+
+    inference_verbose = not a.inference_silent
 
     denoiser_configuration.training.train_mode = False
     denoiser_configuration.model.save_inference_to_disk = False
@@ -159,7 +160,8 @@ if __name__ == '__main__':
     for line in lines:
         try:
             print(line, '->', process_series(line, a.base_dir, out_dir, engine,
-                                             InSARInferenceDataset, cfg=cfg, overwrite=a.overwrite))
+                                             InSARInferenceDataset, verbose=inference_verbose,
+                                             cfg=cfg, overwrite=a.overwrite))
         except Exception:
             with open(os.path.join(out_dir, f'errors_shard{i}.log'), 'a') as ef:
                 ef.write(f'{line}\n{traceback.format_exc()}\n')
