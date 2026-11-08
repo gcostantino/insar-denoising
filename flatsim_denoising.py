@@ -20,7 +20,7 @@ WVL, RMS_THRESH, ABS_THRESH, POSITIVE_AWAY = 55.5, 10., 300., True  # abs thresh
 
 UNIT_SCALE = 0.1   # mm -> cm (InSARDenoiser units)
 
-DENOISE_CFG = dict(N=128, Nt=9, spatial_stride=128, t_stride=8, stat='median',
+DENOISE_CFG = dict(N=128, Nt=9, spatial_stride=64, t_stride=2, stat='median',
                    temporal_taper='hann', taper='hann', edge_trim=8,
                    min_valid_frac=0.0, anchor_weight=0.0, correct=True)
 
@@ -125,7 +125,8 @@ if __name__ == '__main__':
     ap.add_argument('--stat', choices=['mean', 'median'], default='median')
     ap.add_argument('--spatial-taper', choices=['hann', 'none'], default='hann', help='spatial taper')
     ap.add_argument('--temporal-taper', choices=['hann', 'uniform'], default='hann')
-    ap.add_argument('--batch_windows', type=int, default=2048, help='batch windows')
+    ap.add_argument('--batch-windows', type=int, default=2048, help='batch windows')
+    ap.add_argument('--batch-size-gpu', type=int, default=128, help='batch size of GPU')
 
     a = ap.parse_args()
 
@@ -144,6 +145,7 @@ if __name__ == '__main__':
     denoiser_configuration.model.save_inference_to_disk = False
     denoiser_configuration.training.device_type = a.device
     denoiser_configuration.training.device_id = a.cuda_idx
+    denoiser_configuration.training.batch_size = a.batch_size_gpu
 
     engine = Engine(InSARDenoiser(denoiser_configuration), denoiser_configuration)  # built once
     engine.module.build()
