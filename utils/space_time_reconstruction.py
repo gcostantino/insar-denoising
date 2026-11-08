@@ -28,32 +28,51 @@ def extract_windows(arr, origins, N):
     return np.stack([arr[..., y:y + N, x:x + N] for y, x in origins])
 
 
+def window_topo(static, idx):
+    """Per-window min/max normalized topo for the windows in idx -> (b,1,N,N,1)."""
+    tw = extract_windows(static['topo2d'], static['origins'][idx], static['N'])
+    mn = np.nanmin(tw, axis=(1, 2), keepdims=True)
+    rg = np.nanmax(tw, axis=(1, 2), keepdims=True) - mn
+    tw = np.nan_to_num((tw - mn) / np.where(rg > 0, rg, 1.0))
+    return tw[:, None, :, :, None]
+
+
+def nan_all(cube):
+    m = np.ones(cube.shape[1:], bool)
+    for t in range(cube.shape[0]):
+        m &= np.isnan(cube[t])
+    return m
+
+
+def fill_cube_inplace(cube, fill_range=10., seed=0):
+    """Frame-by-frame fill of NaNs (cube must be float32 and writable)."""
+    rng = np.random.default_rng(seed)
+    for t in range(cube.shape[0]):
+        nan = np.isnan(cube[t])
+        n = int(nan.sum())
+        if n:
+            cube[t][nan] = rng.uniform(-fill_range, fill_range, n).astype(np.float32)
+
+
+def fill_cube(cube, fill_range=10., seed=0):
+    """Copy variant, used only when the original NaN cube is needed (anchoring)."""
+    filled = cube.astype(np.float32, copy=True)
+    fill_cube_inplace(filled, fill_range, seed)
+    return filled
+
+
 def prepare_static(topo, mask, N, spatial_stride, min_valid_frac=0.0):
-    """Everything that depends on space only. mask: (ny,nx) bool, True = masked."""
     ny, nx = mask.shape
     assert topo.shape == (ny, nx), (topo.shape, mask.shape)
     origins, _ = make_grid((ny, nx), N, spatial_stride)
     ys_f, xs_f = np.unique(origins[:, 0]), np.unique(origins[:, 1])
     gidx = np.stack([np.searchsorted(ys_f, origins[:, 0]),
                      np.searchsorted(xs_f, origins[:, 1])], axis=1)
-
     wmask = extract_windows(mask.astype(bool), origins, N)
     keep = np.flatnonzero((1 - wmask.mean(axis=(1, 2))) >= max(min_valid_frac, 1e-12))
-    origins, gidx, wmask = origins[keep], gidx[keep], wmask[keep]
-
-    tw = extract_windows(topo.astype(np.float32), origins, N)
-    mn = np.nanmin(tw, axis=(1, 2), keepdims=True)
-    rg = np.nanmax(tw, axis=(1, 2), keepdims=True) - mn
-    tw = np.nan_to_num((tw - mn) / np.where(rg > 0, rg, 1.0))
-    return dict(origins=origins, gidx=gidx, wmask=wmask, topo=tw[:, None, :, :, None],
-                ys_f=ys_f, xs_f=xs_f, shape=(ny, nx), N=N)
-
-
-def fill_cube(cube, fill_range=10., seed=0):
-    filled = cube.astype(np.float32).copy()
-    nan = np.isnan(filled)
-    filled[nan] = np.random.default_rng(seed).uniform(-fill_range, fill_range, nan.sum())
-    return filled
+    return dict(origins=origins[keep], gidx=gidx[keep], wmask=wmask[keep],
+                topo2d=topo.astype(np.float32), ys_f=ys_f, xs_f=xs_f,
+                shape=(ny, nx), N=N)
 
 
 def temporal_weights(Nt, kind='hann'):
@@ -80,19 +99,37 @@ def temporal_system(T, Nt, t_starts, w, ridge=1e-9):
     return B.T @ (wr[:, None] * B) + ridge * np.eye(T - 1)
 
 
-def predict_chunk(static, cube, filled, t0, Nt, engine, dataset_cls):
-    """Crop one time chunk for all windows, run inference once.
-    Returns pred (W,Nt,N,N) and raw_rel (raw minus its own first frame)."""
+def predict_chunk(static, filled, t0, Nt, engine, dataset_cls,
+                  raw_cube=None, batch_windows=2000):
+    """Batched inference into a preallocated array. Returns pred (W,Nt,N,N), raw_rel or None."""
     o, N = static['origins'], static['N']
-    frames = extract_windows(filled[t0:t0 + Nt], o, N)[..., None]
-    ds = dataset_cls(x=frames, topo=static['topo'])
-    pred = np.asarray(engine.predict(data=ds))
-    pred = pred[..., 0] if pred.ndim == 5 else pred
-    assert pred.shape[0] == len(o), pred.shape
-    pred = np.where(static['wmask'][:, None], np.nan, pred.astype(np.float32))
-    raw = np.where(static['wmask'][:, None], np.nan,
-                   extract_windows(cube[t0:t0 + Nt].astype(np.float32), o, N))
-    return pred, raw - raw[:, :1]
+    W = len(o)
+    chunk = filled[t0:t0 + Nt]
+    pred = np.empty((W, Nt, N, N), np.float32)
+
+    for s in range(0, W, batch_windows):
+        e = min(s + batch_windows, W)
+        idx = np.arange(s, e)
+        frames = extract_windows(chunk, o[s:e], N)[..., None]
+        ds = dataset_cls(x=frames, topo=window_topo(static, idx))
+        out = np.asarray(engine.predict(data=ds))
+        out = out[..., 0] if out.ndim == 5 else out
+        assert out.shape[0] == e - s, out.shape
+        pred[s:e] = out
+        del frames, ds, out
+
+    wm = static['wmask']
+    for k in range(W):  # in-place masking
+        pred[k][:, wm[k]] = np.nan
+
+    raw_rel = None
+    if raw_cube is not None:
+        raw_rel = extract_windows(raw_cube[t0:t0 + Nt], o, N).astype(np.float32, copy=False)
+        first = raw_rel[:, :1].copy()
+        raw_rel -= first
+        for k in range(W):
+            raw_rel[k][:, wm[k]] = np.nan
+    return pred, raw_rel
 
 
 def select_subset(prep, stride):
@@ -113,18 +150,20 @@ def select_subset(prep, stride):
 def stitch_chunk(static, pred, raw_rel, stride, stat='median', correct=True, taper='hann',
                  edge_trim=8, max_lag=None, min_overlap_frac=0.25, min_pixels=200,
                  anchor_weight=0.0):
-    """Spatial stitching of one chunk -> Y (Nt,H,W), relative to the chunk's first frame."""
     N = static['N']
     sel, origins, gnew = select_subset(static, stride)
+    full = len(sel) == len(static['origins'])
+    p = pred if full else pred[sel]  # no copy in the common case
+    if anchor_weight > 0 and raw_rel is None:
+        raise ValueError('anchor_weight > 0 requires raw_rel')
+    r = None if raw_rel is None else (raw_rel if full else raw_rel[sel])
     s = stride if np.isscalar(stride) else min(stride)
     if max_lag is None:
         max_lag = int(np.clip(np.ceil(0.5 * N / s), 1, 6))
-    p = pred[sel]
     info = dict(n_windows=len(sel), max_lag=max_lag)
     if correct:
         c, est = estimate_offsets(p, origins, gnew, N, stat, max_lag, min_overlap_frac,
-                                  edge_trim, min_pixels, raw=raw_rel[sel],
-                                  anchor_weight=anchor_weight)
+                                  edge_trim, min_pixels, raw=r, anchor_weight=anchor_weight)
         info.update(est)
     else:
         c = np.zeros(p.shape[:2], np.float32)
@@ -235,45 +274,50 @@ def estimate_workload(shape, T, N=128, Nt=9, spatial_stride=16, t_stride=2):
 def denoise_series(cube, topo, engine, dataset_cls, mask=None, N=128, Nt=9,
                    spatial_stride=16, t_stride=2, temporal_taper='hann',
                    min_valid_frac=0.0, fill_range=10., seed=0, keep_chunks=False,
-                   **stitch_kw):
-    """cube: (T,ny,nx) with NaNs. Returns U (T,ny,nx) relative to frame 0, and info."""
+                   batch_windows=2000, **stitch_kw):
     T = cube.shape[0]
     assert T >= Nt, f'Need at least {Nt} frames'
-    assert 1 <= t_stride <= Nt - 1, 't_stride must be <= Nt-1 to keep chunks connected'
+    assert 1 <= t_stride <= Nt - 1
     if mask is None:
-        mask = np.isnan(cube).all(axis=0)
+        mask = nan_all(cube)  # before any filling
     static = prepare_static(topo, mask, N, spatial_stride, min_valid_frac)
-    filled = fill_cube(cube, fill_range, seed)
     H, W = static['shape']
 
+    if stitch_kw.get('anchor_weight', 0.0) > 0:
+        filled, raw_cube = fill_cube(cube, fill_range, seed), cube
+    else:
+        fill_cube_inplace(cube, fill_range, seed)
+        filled, raw_cube = cube, None
+
     t_starts = _starts(T, Nt, t_stride)
-
-    n_grid = len(_starts(H, N, spatial_stride)) * len(_starts(W, N, spatial_stride))
-    print(f"windows per chunk: {len(static['origins'])} kept of {n_grid} "
-          f"({n_grid - len(static['origins'])} skipped as empty)")
-    print(f"chunks: {len(t_starts)} -> total crops to denoise: "
-          f"{len(static['origins']) * len(t_starts)}")
-
-    estimate_workload(static['shape'], T, N=N, Nt=Nt, spatial_stride=spatial_stride, t_stride=t_stride)
-
     w = temporal_weights(Nt, temporal_taper)
     M = temporal_system(T, Nt, t_starts, w)
     rhs = np.zeros((T - 1, H, W))
     bad = np.zeros((H, W), bool)
     infos, chunks = [], []
 
+    n_grid = len(_starts(H, N, spatial_stride)) * len(_starts(W, N, spatial_stride))
+    print(f"windows per chunk: {len(static['origins'])} kept of {n_grid} "
+          f"({n_grid - len(static['origins'])} skipped as empty)")
+    print(f"chunks: {len(t_starts)} -> total crops to denoise: "
+          f"{len(static['origins']) * len(t_starts)}")
+    estimate_workload(static['shape'], T, N=N, Nt=Nt, spatial_stride=spatial_stride, t_stride=t_stride)
+
     for k, t0 in enumerate(t_starts):
-        pred, raw_rel = predict_chunk(static, cube, filled, int(t0), Nt, engine, dataset_cls)
+        pred, raw_rel = predict_chunk(static, filled, int(t0), Nt, engine, dataset_cls,
+                                      raw_cube, batch_windows)
         Y, info = stitch_chunk(static, pred, raw_rel, spatial_stride, **stitch_kw)
+        del pred, raw_rel
         add_chunk(rhs, Y, int(t0), w)
         bad |= ~np.isfinite(Y[1:]).all(axis=0)
         infos.append(info)
         if keep_chunks:
             chunks.append(Y.astype(np.float32))
+        del Y
         print(f'chunk {k + 1}/{len(t_starts)} (t0={t0}): {info["n_windows"]} windows, '
               f'rms {info.get("rms_before", np.nan):.3f} -> {info.get("rms_after", np.nan):.3f}')
 
-    u = np.tensordot(np.linalg.inv(M), rhs, axes=1)  # (T-1,H,W)
+    u = np.tensordot(np.linalg.inv(M), rhs, axes=1)
     U = np.concatenate([np.zeros((1, H, W)), u], axis=0)
     U[:, bad] = np.nan
     return U.astype(np.float32), dict(chunks=chunks, infos=infos, t_starts=t_starts,
