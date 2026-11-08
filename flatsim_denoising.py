@@ -153,9 +153,11 @@ if __name__ == '__main__':
     setup_logging(a.log_level, a.log_file)
     configure(profile=a.profile or None, track_memory=a.profile_memory)
 
+    batch_windows = None #a.batch_windows
+
     cfg = dict(DENOISE_CFG)
     cfg.update(spatial_stride=a.spatial_stride, t_stride=a.temporal_stride, stat=a.stat,
-               taper=a.spatial_taper, temporal_taper=a.temporal_taper, batch_windows=a.batch_windows)
+               taper=a.spatial_taper, temporal_taper=a.temporal_taper, batch_windows=batch_windows)
 
     max_stride = int(0.75 * (cfg['N'] - 2 * cfg['edge_trim']))  # 84 with defaults
     if cfg['correct'] and a.spatial_stride > max_stride:
