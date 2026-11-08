@@ -150,10 +150,10 @@ if __name__ == '__main__':
     denoiser_configuration.training.device_id = a.cuda_idx
     denoiser_configuration.training.batch_size = a.batch_size_gpu
     
-    denoiser_configuration.data.num_workers = 2
+    '''denoiser_configuration.data.num_workers = 2
     denoiser_configuration.data.prefetch_factor = 2
     denoiser_configuration.data.pin_memory = True
-    denoiser_configuration.data.persistent_workers = True
+    denoiser_configuration.data.persistent_workers = True'''
 
     engine = Engine(InSARDenoiser(denoiser_configuration), denoiser_configuration)  # built once
     engine.module.build()
