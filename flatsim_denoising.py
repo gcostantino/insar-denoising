@@ -101,6 +101,10 @@ def build_master(out_dir, master_path):
             rel = os.path.relpath(p, os.path.dirname(os.path.abspath(master_path)))
             m[os.path.relpath(p, out_dir)[:-3]] = h5py.ExternalLink(rel, '/')
 
+# example with 2 devices:
+# CUDA_VISIBLE_DEVICES=0 python flatsim_denoising.py --out-dir results --shard 0/2 &
+# CUDA_VISIBLE_DEVICES=1 python flatsim_denoising.py --out-dir results --shard 1/2 &
+# wait
 
 if __name__ == '__main__':
     ap = argparse.ArgumentParser()
@@ -123,7 +127,7 @@ if __name__ == '__main__':
     cfg.update(spatial_stride=a.spatial_stride, t_stride=a.temporal_stride, stat=a.stat,
                taper=a.spatial_taper, temporal_taper=a.temporal_taper)
 
-    tag = f's{a.spatial_stride}_t{a.temporal_stride}_{a.stat}_{a.spatial_taper}-{a.temporal_taper}'
+    tag = f'sstride{a.spatial_stride}_tstride{a.temporal_stride}_aggreg_{a.stat}_staper_{a.spatial_taper}-ttaper_{a.temporal_taper}'
     out_dir = os.path.join(a.out_dir, tag)
 
     denoiser_configuration.training.train_mode = False
