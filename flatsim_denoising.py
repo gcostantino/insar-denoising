@@ -91,7 +91,7 @@ def process_series(line, base_dir, out_dir, engine, dataset_cls, cfg=DENOISE_CFG
     print(f'[{line.strip()}] cube {data["cube"].shape}, orbit {data["meta"]["orbit"]}')
     data['cube'] *= UNIT_SCALE  # mm to cm, as InSARDenoiser wants cm
     U, info = denoise_series(data['cube'], data['topo'], engine, dataset_cls,
-                             mask=data['mask'], **cfg)
+                             mask=data['mask'], verbose=(not cfg['inference_silent']), **cfg)
     U /= UNIT_SCALE  # back to mm, so the saved units attribute stays correct
     save_series(h5path, data, U, cfg, info, time.time() - t0)
     return f'done in {time.time() - t0:.0f}s'
@@ -127,12 +127,14 @@ if __name__ == '__main__':
     ap.add_argument('--temporal-taper', choices=['hann', 'uniform'], default='hann')
     ap.add_argument('--batch-windows', type=int, default=2048, help='batch windows')
     ap.add_argument('--batch-size-gpu', type=int, default=128, help='batch size of GPU')
+    ap.add_argument('--inference-silent', action='store_true')
 
     a = ap.parse_args()
 
     cfg = dict(DENOISE_CFG)
     cfg.update(spatial_stride=a.spatial_stride, t_stride=a.temporal_stride, stat=a.stat,
-               taper=a.spatial_taper, temporal_taper=a.temporal_taper, batch_windows=a.batch_windows)
+               taper=a.spatial_taper, temporal_taper=a.temporal_taper, batch_windows=a.batch_windows,
+               inference_silent=a.inference_silent)
 
     max_stride = int(0.75 * (cfg['N'] - 2 * cfg['edge_trim']))  # 84 with defaults
     if cfg['correct'] and a.spatial_stride > max_stride:
