@@ -18,6 +18,8 @@ from utils.space_time_reconstruction import denoise_series
 
 WVL, RMS_THRESH, ABS_THRESH, POSITIVE_AWAY = 55.5, 10., 300., True  # abs thresh, though it should depend on the TS
 
+UNIT_SCALE = 0.1   # mm -> cm (InSARDenoiser units)
+
 DENOISE_CFG = dict(N=128, Nt=9, spatial_stride=128, t_stride=8, stat='median',
                    temporal_taper='hann', taper='hann', edge_trim=8,
                    min_valid_frac=0.0, anchor_weight=0.0, correct=True)
@@ -58,6 +60,7 @@ def save_series(h5path, data, U, cfg, info, runtime_s):
         f.attrs['weights'] = str(denoiser_configuration.model.weight_load_path)
 
         f.attrs['denoiser_cfg'] = json.dumps(cfg, default=str)
+        f.attrs['denoiser_unit_scale'] = UNIT_SCALE
         f.attrs['n_windows_per_chunk'] = info['n_windows']
         f.attrs['n_chunks'] = len(info['t_starts'])
         f.attrs['runtime_s'] = runtime_s
@@ -86,8 +89,9 @@ def process_series(line, base_dir, out_dir, engine, dataset_cls, cfg=DENOISE_CFG
     if data['cube'].shape[0] < cfg['Nt']:
         return f'too short ({data["cube"].shape[0]} frames)'
     print(f'[{line.strip()}] cube {data["cube"].shape}, orbit {data["meta"]["orbit"]}')
-    U, info = denoise_series(data['cube'], data['topo'], engine, dataset_cls,
+    U, info = denoise_series(data['cube'] * UNIT_SCALE, data['topo'], engine, dataset_cls,
                              mask=data['mask'], **cfg)
+    U = U / UNIT_SCALE  # back to mm, so the saved units attribute stays correct
     save_series(h5path, data, U, cfg, info, time.time() - t0)
     return f'done in {time.time() - t0:.0f}s'
 
