@@ -125,12 +125,13 @@ if __name__ == '__main__':
     ap.add_argument('--stat', choices=['mean', 'median'], default='median')
     ap.add_argument('--spatial-taper', choices=['hann', 'none'], default='hann', help='spatial taper')
     ap.add_argument('--temporal-taper', choices=['hann', 'uniform'], default='hann')
+    ap.add_argument('--batch_windows', type=int, default=2048, help='batch windows')
 
     a = ap.parse_args()
 
     cfg = dict(DENOISE_CFG)
     cfg.update(spatial_stride=a.spatial_stride, t_stride=a.temporal_stride, stat=a.stat,
-               taper=a.spatial_taper, temporal_taper=a.temporal_taper)
+               taper=a.spatial_taper, temporal_taper=a.temporal_taper, batch_windows=a.batch_windows)
 
     max_stride = int(0.75 * (cfg['N'] - 2 * cfg['edge_trim']))  # 84 with defaults
     if cfg['correct'] and a.spatial_stride > max_stride:
