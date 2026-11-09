@@ -82,6 +82,8 @@ def is_complete(h5path):
 
 def process_series(line, base_dir, out_dir, engine, dataset_cls, cfg=DENOISE_CFG, overwrite=False, verbose=True):
     region, product = os.path.split(line.strip())
+    if 'NSBAS_DAUX-PKG' in product:
+        return 'skipped (auxiliary folder, not a time series)'
     h5path = os.path.join(out_dir, region, product + '.h5')
     if not overwrite and is_complete(h5path):
         return 'skipped'
@@ -185,7 +187,15 @@ if __name__ == '__main__':
     engine.load_weights(denoiser_configuration.model.weight_load_path)
 
     i, n = map(int, a.shard.split('/'))
-    lines = [l.strip() for l in open(a.list) if l.strip()][i::n]
+    # lines = [l.strip() for l in open(a.list) if l.strip()][i::n]
+
+    raw_lines = [l.strip() for l in open(a.list) if l.strip()]
+    aux_lines = [l for l in raw_lines if 'NSBAS_DAUX-PKG' in l]
+    ts_lines = list(dict.fromkeys(l for l in raw_lines if 'NSBAS_DAUX-PKG' not in l))
+    if aux_lines:
+        print(f'skipping {len(aux_lines)} auxiliary (DAUX) entries; {len(ts_lines)} time series to process')
+    lines = ts_lines[i::n]
+
     os.makedirs(out_dir, exist_ok=True)
     for line in lines:
         try:
