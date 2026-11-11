@@ -129,14 +129,15 @@ The previous code is unchanged, just replace `engine.fit()` with:
 ```python
 # ...
 engine.predict(data_pipeline=pipeline)
+# or 
+engine.predict(data=test_dataset)
 ```
 ### Applying InSARDenoiser on real data (cf. `ismetpasa_denoising.py`)
 ```python
-# suppose x, y and topo are available
+# suppose x and topo are available
 # x: InSAR time series. The shape of x must be (time, height, width)
-# y: ground truth, (usually not available for real datasets, so set y=None). You can also set y=x (y is never used for inference anyways)
 # topo: topography (must have the same height/width dimension as x)
-# x, y, topo must fit in memory to use InSARMemDataset, otherwise create a H5InSARDataset
+# x, y, topo must fit in memory to use InSARInferenceDataset, otherwise create a H5InSARDataset
 
 topo = (topo - np.nanmin(topo)) / (np.nanmax(topo) - np.nanmin(topo))  # do not forget to normalize the topography!
 
@@ -144,17 +145,10 @@ data, topo = data[None, ..., None], topo[None, None, ..., None]  # here, we add 
 # at the end, x will have shape (1, N_t, N, N, 1) and topo (1, 1, N, N, 1),
 # where N is the image dimension (here, 128), and N_t is the temporal dimension (here, 9 frames)
 
-dataset = InSARMemDataset(x=x, y=None, topo=topo)
-pipeline = GenericDataPipeline(
-    config=denoiser_configuration,
-    dataset=dataset,
-    preprocessing=denoiser_configuration.data.preprocessing,
-)
-
-pipeline.setup()
-# for example, we want to keep the result in memory
-# be sure to have:
-# denoiser_configuration.model.save_inference_to_disk = False
+dataset = InSARInferenceDataset(x=x, topo=topo)
+# be sure that the following is set in the configuration file
+denoiser_configuration.training.train_mode = False  # otherwise inference won't start
+denoiser_configuration.model.save_inference_to_disk = False  # True: save predictions as a .h5 (must set config.model.inference_filename)
 
 denoiser = InSARDenoiser(denoiser_configuration)
 engine = Engine(denoiser, denoiser_configuration)
@@ -163,5 +157,5 @@ engine = Engine(denoiser, denoiser_configuration)
 engine.module.build()
 engine.load_weights(denoiser_configuration.model.weight_load_path)
 
-prediction = engine.predict(data_pipeline=pipeline)
+prediction = engine.predict(data=dataset)
 ```
