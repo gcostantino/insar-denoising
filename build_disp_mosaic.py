@@ -2,17 +2,17 @@
 """Build a sparse global mosaic of cumulative LOS displacement (last - first epoch)
 from the denoised FLATSIM series (.h5), separately for ascending / descending.
 
-Output: one .h5 with, per orbit, the occupied grid cells only (sparse), plus a per-frame table.
+Output: one .h5 with, per orbit, the occupied grid cells only (sparse), plus a per-frame table
+(including each frame's bounding box, used by the plot script to draw region footprints).
 Units: mm (cumulative), mm/yr (rate). Positive = away from the satellite (as in the inputs).
 
 Example:
-  python build_disp_mosaic.py --results-dir results/sstride64_... --out slip_mosaic.h5 --merge median
+  python build_disp_mosaic.py --results-dir results/<tag> --out disp_mosaic.h5 --merge median
 """
 import argparse
 import glob
 import os
 import shutil
-import tempfile
 import time
 import traceback
 import warnings
@@ -95,7 +95,9 @@ def frame_cells(f, res, nx_g, n_avg):
     c = np.bincount(inv, weights=valid, minlength=len(uniq))
     with np.errstate(invalid='ignore', divide='ignore'):
         val = np.where(c > 0, s / c, np.nan).astype(np.float32)
-    stats = dict(n_pixels=int(ok.sum()), frac_masked=float(masked.mean()),
+    stats = dict(lon_min=float(lon[ok].min()), lon_max=float(lon[ok].max()),
+                 lat_min=float(lat[ok].min()), lat_max=float(lat[ok].max()),
+                 n_pixels=int(ok.sum()), frac_masked=float(masked.mean()),
                  frac_nan_unmasked=float(np.isnan(d[~masked]).mean()) if (~masked).any() else np.nan,
                  frac_valid=float(valid.sum() / max(ok.sum(), 1)))
     return uniq, val, stats
@@ -180,7 +182,7 @@ def merge_orbit(ks, scratch, span_all, nx_g, band_rows, merge, writer):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--results-dir', required=True, help='folder with the denoised .h5 files (searched recursively)')
-    ap.add_argument('--out', default='slip_mosaic.h5')
+    ap.add_argument('--out', default='disp_mosaic.h5')
     ap.add_argument('--merge', choices=['mean', 'median'], default='mean', help='how overlapping frames are combined')
     ap.add_argument('--res', type=float, default=None, help='cell size in degrees (default: native pixel size)')
     ap.add_argument('--n-avg', type=int, default=1, help='epochs averaged at each end (1 = literal last - first)')
@@ -235,6 +237,8 @@ def main():
                 meta.append(dict(key=attr_str(f.attrs.get('key', os.path.basename(p))),
                                  region=attr_str(f.attrs.get('region', '')), orbit=orbit,
                                  first_date=int(d0), last_date=int(d1), span_yr=float(span),
+                                 lon_min=st['lon_min'], lon_max=st['lon_max'],
+                                 lat_min=st['lat_min'], lat_max=st['lat_max'],
                                  n_pixels=st['n_pixels'], frac_valid=st['frac_valid'],
                                  heading_deg=float(f.attrs.get('heading_deg', np.nan)),
                                  incidence_deg=float(f.attrs.get('incidence_deg', np.nan)),
