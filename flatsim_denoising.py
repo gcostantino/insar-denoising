@@ -166,7 +166,7 @@ if __name__ == '__main__':
     if cfg['correct'] and a.spatial_stride > max_stride:
         ap.error(f'--spatial-stride must be <= {max_stride} for the offset correction to have overlaps')
 
-    tag = f'sstride{a.spatial_stride}_tstride{a.temporal_stride}_aggreg_{a.stat}_staper_{a.spatial_taper}-ttaper_{a.temporal_taper}'
+    tag = f'sstride{a.spatial_stride}_tstride{a.temporal_stride}_aggreg_{a.stat}_staper_{a.spatial_taper}_ttaper_{a.temporal_taper}'
     out_dir = os.path.join(a.out_dir, tag)
 
     inference_verbose = not a.inference_silent
