@@ -15,11 +15,14 @@ Overlap statistic = median over ALL overlapping cells (no edge trimming). Weight
 Huber-robust IRLS. Gauge: frames of --ref-track (zero mean offset) or, if absent in a connected group of
 frames, the most connected frame of that group.
 
+Geocoding: pixels with non-finite lon/lat or with lon = lat = 0 (fill value of the LUT outside the footprint) are
+ignored; frame bounding boxes (/frames/lon_min...) are computed from unmasked, valid pixels only.
+
 Output .h5: per orbit sparse cells (raw fields and, if corrected, *_corr_* fields), /frames table, /pairs table.
 Units: mm and mm/yr, positive away from the satellite.
 
 Example:
-  python build_disp_mosaic.py --results-dir results/<tag> --out disp_mosaic.h5 --merge median \
+  python build_disp_mosaic.py --results-dir results/<tag> --out slip_mosaic.h5 --merge median \
          --offset-mode rate --ref-track D004
 """
 import argparse
@@ -80,12 +83,19 @@ def list_series(results_dir, out_path):
     return keep
 
 
+def valid_geometry(lon, lat):
+    """Finite lon/lat, excluding the (0, 0) fill value found outside the footprint."""
+    return np.isfinite(lon) & np.isfinite(lat) & ~((lon == 0) & (lat == 0))
+
+
 def native_spacing_deg(f, win=200):
     """Pixel size in degrees (sqrt of the median pixel area, longitude scaled by cos(lat))."""
     ny, nx = f['lon'].shape
     y0, x0 = max(0, ny // 2 - win // 2), max(0, nx // 2 - win // 2)
     lo = f['lon'][y0:y0 + win, x0:x0 + win].astype(float)
     la = f['lat'][y0:y0 + win, x0:x0 + win].astype(float)
+    bad = ~valid_geometry(lo, la)
+    lo[bad], la[bad] = np.nan, np.nan
     c = np.cos(np.deg2rad(np.nanmean(la)))
     ex, ey_ = (lo[:-1, 1:] - lo[:-1, :-1]) * c, la[:-1, 1:] - la[:-1, :-1]
     fx, fy = (lo[1:, :-1] - lo[:-1, :-1]) * c, la[1:, :-1] - la[:-1, :-1]
@@ -94,16 +104,20 @@ def native_spacing_deg(f, win=200):
 
 # ----------------------------------------------------------------------------- pixel -> cell binning
 def pixel_cells(f, res, nx_g):
-    """Cell index of every pixel. Returns sorted unique cell ids, pixel->cell index (valid-geometry pixels),
-    boolean (ny,nx) mask of pixels with finite lon/lat, boolean (ny,nx) masked-out pixels, bbox."""
+    """Cell index of every pixel with valid geometry. Returns sorted unique cell ids, pixel->cell index,
+    boolean (ny,nx) mask of pixels with valid geometry, boolean (ny,nx) masked-out pixels, bbox of the
+    unmasked valid pixels (lon_min, lon_max, lat_min, lat_max)."""
     lon, lat = f['lon'][...].astype(np.float64), f['lat'][...].astype(np.float64)
     lon = (lon + 180.0) % 360.0 - 180.0
-    ok = np.isfinite(lon) & np.isfinite(lat)
+    ok = valid_geometry(lon, lat)
+    masked = f['mask'][...].astype(bool)
     ix = np.floor((lon[ok] - LON0) / res).astype(np.int64)
     iy = np.floor((lat[ok] - LAT0) / res).astype(np.int64)
     uniq, inv = np.unique(iy * nx_g + ix, return_inverse=True)
-    masked = f['mask'][...].astype(bool)
-    bbox = (float(lon[ok].min()), float(lon[ok].max()), float(lat[ok].min()), float(lat[ok].max()))
+    good = ok & ~masked
+    if not good.any():
+        good = ok
+    bbox = (float(lon[good].min()), float(lon[good].max()), float(lat[good].min()), float(lat[good].max()))
     return uniq, inv, ok, masked, bbox
 
 
@@ -451,7 +465,8 @@ def main():
                                  incidence_deg=float(f.attrs.get('incidence_deg', np.nan)),
                                  n_cells=len(ids)))
             log(f'[{len(meta)}/{len(files)}] {orbit[:4]} {meta[-1]["key"]} span {span:.2f} yr, '
-                f'{len(ids)} cells, valid {st["frac_valid"]:.0%}, masked {st["frac_masked"]:.0%} '
+                f'{len(ids)} cells, valid {st["frac_valid"]:.0%}, masked {st["frac_masked"]:.0%}, '
+                f'box lon {st["lon_min"]:.2f}..{st["lon_max"]:.2f} lat {st["lat_min"]:.2f}..{st["lat_max"]:.2f} '
                 f'({time.time() - t0:.0f}s)')
             if st['frac_masked'] > 0.9 or (st['frac_nan_unmasked'] > 0.5):
                 log('  WARNING: mask/NaN fractions look odd, check the mask convention for this file')
@@ -561,6 +576,7 @@ def main():
             convention='LOS displacement, positive away from the satellite, last epoch minus first epoch',
             nan_policy='cells covered by a frame but without valid pixels are kept with NaN values (n_valid = 0)',
             cell_definition='cell (ix, iy) spans lon [lon0+ix*res, lon0+(ix+1)*res), lat [lat0+iy*res, lat0+(iy+1)*res)',
+            geometry_policy='pixels with non-finite lon/lat or lon=lat=0 are ignored; frame boxes from unmasked valid pixels',
             offset_mode=mode, ref_track=a.ref_track or '', min_overlap_cells=a.min_overlap_cells,
             source_dir=os.path.abspath(a.results_dir), created=datetime.now().isoformat())
         if mode != 'none':
