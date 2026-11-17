@@ -60,8 +60,9 @@ def save_series(h5path, data, U, cfg, info, runtime_s):
             v = cfg[k]
             f.attrs[f'cfg_{k}'] = int(v) if isinstance(v, bool) else v
 
-            if data.get('velocity') is not None:
-                _ds(f, 'velocity', data['velocity'], chunks=c2)  # mm/yr, the FLATSIM one
+            if data.get('velocity') is not None and 'velocity' not in f:
+                _ds(f, 'velocity', data['velocity'], chunks=c2)  # mm/yr, FLATSIM mean velocity
+
             for k in ('rms_before', 'rms_after', 'rms_after_constrained'):
                 if k in info: f.attrs[k] = info[k]
             if 'velocity_misfit_final' in info: f.attrs['velocity_misfit_final'] = info['velocity_misfit_final']
