@@ -57,7 +57,7 @@ def save_series(h5path, data, U, cfg, info, runtime_s):
             f.attrs[k] = v
 
         for k in ('N', 'Nt', 'spatial_stride', 't_stride', 'stat', 'taper', 'temporal_taper',
-                  'edge_trim', 'min_valid_frac', 'anchor_weight', 'correct'):
+                  'edge_trim', 'min_valid_frac', 'anchor_weight'):
             v = cfg[k]
             f.attrs[f'cfg_{k}'] = int(v) if isinstance(v, bool) else v
 
@@ -185,7 +185,7 @@ if __name__ == '__main__':
     cfg.update(spatial_stride=a.spatial_stride, t_stride=a.temporal_stride, batch_windows=batch_windows)
 
     max_stride = int(0.75 * (cfg['N'] - 2 * cfg['edge_trim']))  # 84 with defaults
-    if cfg['correct'] and a.spatial_stride > max_stride:
+    if a.spatial_stride > max_stride:
         ap.error(f'--spatial-stride must be <= {max_stride} for the offset correction to have overlaps')
 
     tag = f'sstride{a.spatial_stride}_tstride{a.temporal_stride}_aggreg_median_staper_hann_ttaper_hann'
