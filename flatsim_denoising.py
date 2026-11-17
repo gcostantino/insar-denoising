@@ -15,9 +15,8 @@ from dataset.insarinferencedataset import InSARInferenceDataset
 from kito import Engine
 from model.insar_denoiser import InSARDenoiser
 from utils.flatsim_utils import load_flatsim
+from utils.flatsim_velocity import velocity_sanity
 from utils.profiling import prof, log, configure, setup_logging
-from utils.space_time_reconstruction import denoise_series
-from utils.flatsim_velocity import load_velocity, velocity_sanity
 from utils.space_time_reconstruction import denoise_series, yyyymmdd_to_years
 
 WVL, RMS_THRESH, ABS_THRESH, POSITIVE_AWAY = 55.5, 10., 300., True  # abs thresh, though it should depend on the TS
@@ -101,9 +100,12 @@ def process_series(line, base_dir, out_dir, engine, dataset_cls, cfg=DENOISE_CFG
     with prof.section('load'):
         data = load_flatsim(base_dir, line, rms_thresh=RMS_THRESH, abs_thresh_mm=ABS_THRESH,
                             wavelength_mm=WVL, positive_away=POSITIVE_AWAY)
-    vel = None
-    if cfg['velocity_mode'] != 'none':
-        vel = load_velocity(base_dir, line, data['cube'].shape[1:], WVL, POSITIVE_AWAY, data['mask'])
+
+    use_vel = cfg['velocity_mode'] != 'none'
+    data = load_flatsim(base_dir, line, rms_thresh=RMS_THRESH, abs_thresh_mm=ABS_THRESH,
+                        wavelength_mm=WVL, positive_away=POSITIVE_AWAY, with_velocity=use_vel)
+    vel = data['velocity']
+    if use_vel:
         s = velocity_sanity(data['cube'], yyyymmdd_to_years(data['dates']), vel)
         if s and np.isfinite(s['corr']) and (s['corr'] < 0.8 or abs(s['slope'] - 1) > 0.3):
             return 'skipped: tiff velocity inconsistent with the cube'

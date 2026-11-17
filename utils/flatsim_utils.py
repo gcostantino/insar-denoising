@@ -27,8 +27,39 @@ def _find_any(folder, patterns):
     raise FileNotFoundError(f'No unique match in {folder}. Tried: {tried}. '
                             f'Folder contains: {sorted(os.listdir(folder))[:30]}')
 
+def _find_first(folders, pattern):
+    """Exactly one match for `pattern`, searching the folders in order (time-series folder, then DAUX)."""
+    tried = []
+    for fo in folders:
+        if os.path.isdir(fo):
+            m = sorted(glob.glob(os.path.join(fo, pattern)))
+            if len(m) == 1:
+                return m[0]
+            tried.append((fo, [os.path.basename(x) for x in m]))
+    raise FileNotFoundError(f'{pattern}: no unique match. Searched: {tried}')
 
-def load_flatsim(base_dir, line, rms_thresh=10., abs_thresh_mm=300., wavelength_mm=55.5, positive_away=True):
+
+def load_mean_velocity(folders, shape, mask, wavelength_mm, sign):
+    """FLATSIM mean LOS velocity (band 1 of CNES_MV-LOS_radar_8rlks.tiff) in mm/yr.
+
+    The tiff is in rad/yr, positive away from the satellite; same conversion and sign as the cube.
+    Returns (velocity, velfile). Pixels masked in the cube (all-NaN) are set to NaN.
+    """
+    velfile = _find_first(folders, 'CNES_MV-LOS_radar_8rlks.tiff')
+    v = tifffile.imread(velfile)
+    if v.ndim == 3:                                   # (ny, nx, bands), band 1 = velocity
+        v = v[:, :, 0] if v.shape[-1] <= 4 else v[0]
+    v = v.astype(np.float32)
+    v[v == 9999.] = np.nan
+    v = sign * (wavelength_mm * v) / (4 * np.pi)      # rad/yr -> mm/yr
+    v[~np.isfinite(v)] = np.nan
+    if v.shape != tuple(shape):
+        raise ValueError(f'velocity grid {v.shape} != cube grid {tuple(shape)} ({velfile})')
+    v[mask] = np.nan
+    return v, velfile
+
+def load_flatsim(base_dir, line, rms_thresh=10., abs_thresh_mm=300., wavelength_mm=55.5, positive_away=True,
+                 with_velocity=False):
     """line = 'region/NSBAS_TS-PKG_...'. Returns cube (T,ny,nx) in mm + auxiliary data."""
     region, product = os.path.split(line.strip())
     folder = os.path.join(base_dir, region, product)
@@ -72,6 +103,10 @@ def load_flatsim(base_dir, line, rms_thresh=10., abs_thresh_mm=300., wavelength_
         cube[np.abs(cube) > abs_thresh_mm] = np.nan
     mask = np.isnan(cube).all(axis=0)
 
+    velocity, velfile = None, ''
+    if with_velocity:
+        velocity, velfile = load_mean_velocity([folder, aux], cube.shape[1:], mask, wavelength_mm, sign)
+
     se, sn, su = (float(np.nanmean(los[..., i])) for i in range(3))
     inc = float(np.rad2deg(np.arccos(-su)))
     look_az = float(np.rad2deg(np.arctan2(se, sn)) % 360)
@@ -81,6 +116,6 @@ def load_flatsim(base_dir, line, rms_thresh=10., abs_thresh_mm=300., wavelength_
     meta = dict(key=f'{region}/{product}', region=region, product=product, wvl_mm=wavelength_mm,
                 positive_away=positive_away, rms_thresh=rms_thresh, abs_thresh=abs_thresh_mm,
                 se=se, sn=sn, su=su, incidence_deg=inc, heading_deg=heading, orbit=orbit,
-                tsfile=tsfile)
+                tsfile=tsfile, velfile=velfile)
     return dict(cube=cube, mask=mask, topo=topo, lon=lon, lat=lat, los=los, rms=rms,
-                dates=dates, meta=meta)
+                dates=dates, meta=meta, velocity=velocity)
