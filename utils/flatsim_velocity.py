@@ -11,23 +11,11 @@ warn = logging.getLogger(__name__).warning
 
 
 def _read_band1(path):
-    try:
-        import rasterio
-        with rasterio.open(path) as ds:
-            v = ds.read(1).astype(np.float32)
-            nod = ds.nodata
-    except ImportError:
-        try:
-            from osgeo import gdal
-            ds = gdal.Open(path)
-            b = ds.GetRasterBand(1)
-            v, nod = b.ReadAsArray().astype(np.float32), b.GetNoDataValue()
-        except ImportError:
-            import tifffile
-            a = tifffile.imread(path)
-            if a.ndim == 3:                       # band axis = the smallest one
-                a = np.take(a, 0, axis=int(np.argmin(a.shape)))
-            v, nod = a.astype(np.float32), None
+    import tifffile
+    a = tifffile.imread(path)
+    if a.ndim == 3:                       # band axis = the smallest one
+        a = np.take(a, 0, axis=int(np.argmin(a.shape)))
+    v, nod = a.astype(np.float32), None
     if nod is not None:
         v[v == nod] = np.nan
     return v
