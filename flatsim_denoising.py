@@ -17,14 +17,15 @@ from model.insar_denoiser import InSARDenoiser
 from utils.flatsim_utils import load_flatsim
 from utils.profiling import prof, log, configure, setup_logging
 from utils.space_time_reconstruction import denoise_series
+from utils.flatsim_velocity import load_velocity, velocity_sanity
+from utils.space_time_reconstruction import denoise_series, yyyymmdd_to_years
 
 WVL, RMS_THRESH, ABS_THRESH, POSITIVE_AWAY = 55.5, 10., 300., True  # abs thresh, though it should depend on the TS
 
 UNIT_SCALE = 0.1  # mm -> cm (InSARDenoiser units)
 
-DENOISE_CFG = dict(N=128, Nt=9, spatial_stride=64, t_stride=2, stat='median',
-                   temporal_taper='hann', taper='hann', edge_trim=8,
-                   min_valid_frac=0.0, anchor_weight=0.0, correct=True)
+DENOISE_CFG = dict(N=128, Nt=9, spatial_stride=64, t_stride=2, edge_trim=8,
+                   velocity_mode='after', velocity_order=1, velocity_weight=float('inf'))
 
 
 def _ds(f, name, arr, chunks=None):
@@ -59,6 +60,13 @@ def save_series(h5path, data, U, cfg, info, runtime_s):
                   'edge_trim', 'min_valid_frac', 'anchor_weight', 'correct'):
             v = cfg[k]
             f.attrs[f'cfg_{k}'] = int(v) if isinstance(v, bool) else v
+
+            if data.get('velocity') is not None:
+                _ds(f, 'velocity', data['velocity'], chunks=c2)  # mm/yr, the FLATSIM one
+            for k in ('rms_before', 'rms_after', 'rms_after_constrained'):
+                if k in info: f.attrs[k] = info[k]
+            if 'velocity_misfit_final' in info: f.attrs['velocity_misfit_final'] = info['velocity_misfit_final']
+
         f.attrs['weights'] = str(denoiser_configuration.model.weight_load_path)
 
         f.attrs['denoiser_cfg'] = json.dumps(cfg, default=str)
@@ -93,15 +101,26 @@ def process_series(line, base_dir, out_dir, engine, dataset_cls, cfg=DENOISE_CFG
     with prof.section('load'):
         data = load_flatsim(base_dir, line, rms_thresh=RMS_THRESH, abs_thresh_mm=ABS_THRESH,
                             wavelength_mm=WVL, positive_away=POSITIVE_AWAY)
+    vel = None
+    if cfg['velocity_mode'] != 'none':
+        vel = load_velocity(base_dir, line, data['cube'].shape[1:], WVL, POSITIVE_AWAY, data['mask'])
+        s = velocity_sanity(data['cube'], yyyymmdd_to_years(data['dates']), vel)
+        if s and np.isfinite(s['corr']) and (s['corr'] < 0.8 or abs(s['slope'] - 1) > 0.3):
+            return 'skipped: tiff velocity inconsistent with the cube'
+
     if data['cube'].shape[0] < cfg['Nt']:
         return f'too short ({data["cube"].shape[0]} frames)'
+
     log(f'loaded in {time.time() - t0:.0f}s: cube {data["cube"].shape} '
         f'({data["cube"].nbytes / 1e9:.1f} GB), orbit {data["meta"]["orbit"]}')
 
+    data['velocity'] = vel
     data['cube'] *= UNIT_SCALE  # mm to cm, as InSARDenoiser wants cm
     with prof.section('denoise'):
         U, info = denoise_series(data['cube'], data['topo'], engine, dataset_cls,
-                                 mask=data['mask'], verbose=verbose, **cfg)
+                                 mask=data['mask'], verbose=verbose,
+                                 velocity=None if vel is None else vel * UNIT_SCALE,
+                                 dates=yyyymmdd_to_years(data['dates']), **cfg)
     U /= UNIT_SCALE  # back to mm, so the saved units attribute stays correct
 
     info['profile'] = prof.as_dict()
@@ -139,9 +158,9 @@ if __name__ == '__main__':
     ap.add_argument('--overwrite', action='store_true')
     ap.add_argument('--spatial-stride', type=int, default=128)
     ap.add_argument('--temporal-stride', type=int, default=8)
-    ap.add_argument('--stat', choices=['mean', 'median'], default='median')
-    ap.add_argument('--spatial-taper', choices=['hann', 'none'], default='hann', help='spatial taper')
-    ap.add_argument('--temporal-taper', choices=['hann', 'uniform'], default='hann')
+    #ap.add_argument('--stat', choices=['mean', 'median'], default='median')
+    #ap.add_argument('--spatial-taper', choices=['hann', 'none'], default='hann', help='spatial taper')
+    #ap.add_argument('--temporal-taper', choices=['hann', 'uniform'], default='hann')
     ap.add_argument('--batch-windows', type=int, default=2048, help='batch windows')
     ap.add_argument('--batch-size-gpu', type=int, default=128, help='batch size of GPU')
     ap.add_argument('--inference-silent', action='store_true')
@@ -149,6 +168,10 @@ if __name__ == '__main__':
     ap.add_argument('--profile-memory', action='store_true', help='also log RSS per section')
     ap.add_argument('--log-level', default='INFO', choices=['DEBUG', 'INFO', 'WARNING'])
     ap.add_argument('--log-file', default=None)
+
+    ap.add_argument('--velocity-mode', choices=['none', 'before', 'after'], default='after')
+    ap.add_argument('--velocity-order', type=int, choices=[1, 2], default=1)
+    ap.add_argument('--velocity-weight', type=float, default=float('inf'))
 
     a = ap.parse_args()
 
@@ -159,14 +182,15 @@ if __name__ == '__main__':
     logging.getLogger('kito.engine').setLevel(logging.WARNING)  # suppress InSARDenoiser prediction logs
 
     cfg = dict(DENOISE_CFG)
-    cfg.update(spatial_stride=a.spatial_stride, t_stride=a.temporal_stride, stat=a.stat,
-               taper=a.spatial_taper, temporal_taper=a.temporal_taper, batch_windows=batch_windows)
+    cfg.update(spatial_stride=a.spatial_stride, t_stride=a.temporal_stride, batch_windows=batch_windows)
 
     max_stride = int(0.75 * (cfg['N'] - 2 * cfg['edge_trim']))  # 84 with defaults
     if cfg['correct'] and a.spatial_stride > max_stride:
         ap.error(f'--spatial-stride must be <= {max_stride} for the offset correction to have overlaps')
 
-    tag = f'sstride{a.spatial_stride}_tstride{a.temporal_stride}_aggreg_{a.stat}_staper_{a.spatial_taper}_ttaper_{a.temporal_taper}'
+    tag = f'sstride{a.spatial_stride}_tstride{a.temporal_stride}_aggreg_median_staper_hann_ttaper_hann'
+    if a.velocity_mode != 'none':
+        tag = tag + f'_vel_corr_{a.velocity_mode}_ord_{a.velocity_order}'
     out_dir = os.path.join(a.out_dir, tag)
 
     inference_verbose = not a.inference_silent
