@@ -55,8 +55,8 @@ def save_series(h5path, data, U, cfg, info, runtime_s):
         for k, v in data['meta'].items():
             f.attrs[k] = v
 
-        for k in ('N', 'Nt', 'spatial_stride', 't_stride', 'stat', 'taper', 'temporal_taper',
-                  'edge_trim', 'min_valid_frac', 'anchor_weight'):
+        for k in ('N', 'Nt', 'spatial_stride', 't_stride', 'edge_trim',
+                  'velocity_mode', 'velocity_order', 'velocity_weight'):
             v = cfg[k]
             f.attrs[f'cfg_{k}'] = int(v) if isinstance(v, bool) else v
 
@@ -98,13 +98,11 @@ def process_series(line, base_dir, out_dir, engine, dataset_cls, cfg=DENOISE_CFG
     prof.reset()
     t0 = time.time()
     log(f'loading {line.strip()}')
+    use_vel = cfg['velocity_mode'] != 'none'
     with prof.section('load'):
         data = load_flatsim(base_dir, line, rms_thresh=RMS_THRESH, abs_thresh_mm=ABS_THRESH,
-                            wavelength_mm=WVL, positive_away=POSITIVE_AWAY)
+                            wavelength_mm=WVL, positive_away=POSITIVE_AWAY, with_velocity=use_vel)
 
-    use_vel = cfg['velocity_mode'] != 'none'
-    data = load_flatsim(base_dir, line, rms_thresh=RMS_THRESH, abs_thresh_mm=ABS_THRESH,
-                        wavelength_mm=WVL, positive_away=POSITIVE_AWAY, with_velocity=use_vel)
     vel = data['velocity']
     if use_vel:
         s = velocity_sanity(data['cube'], yyyymmdd_to_years(data['dates']), vel)
@@ -185,13 +183,15 @@ if __name__ == '__main__':
     logging.getLogger('kito.engine').setLevel(logging.WARNING)  # suppress InSARDenoiser prediction logs
 
     cfg = dict(DENOISE_CFG)
-    cfg.update(spatial_stride=a.spatial_stride, t_stride=a.temporal_stride, batch_windows=batch_windows)
+    cfg.update(spatial_stride=a.spatial_stride, t_stride=a.temporal_stride, batch_windows=batch_windows,
+               velocity_mode=a.velocity_mode, velocity_order=a.velocity_order,
+               velocity_weight=a.velocity_weight)
 
     max_stride = int(0.75 * (cfg['N'] - 2 * cfg['edge_trim']))  # 84 with defaults
     if a.spatial_stride > max_stride:
         ap.error(f'--spatial-stride must be <= {max_stride} for the offset correction to have overlaps')
 
-    tag = f'sstride{a.spatial_stride}_tstride{a.temporal_stride}_aggreg_median_staper_hann_ttaper_hann'
+    tag = f'sstride{a.spatial_stride}_tstride{a.temporal_stride}_aggreg_median_staper_hann_ttaper_hann_v2'
     if a.velocity_mode != 'none':
         tag = tag + f'_vel_corr_{a.velocity_mode}_ord_{a.velocity_order}'
     out_dir = os.path.join(a.out_dir, tag)
