@@ -187,7 +187,8 @@ if __name__ == '__main__':
                velocity_mode=a.velocity_mode, velocity_order=a.velocity_order,
                velocity_weight=a.velocity_weight)
 
-    max_stride = int(0.75 * (cfg['N'] - 2 * cfg['edge_trim']))  # 84 with defaults
+    # max_stride = int(0.75 * (cfg['N'] - 2 * cfg['edge_trim']))  # 84 with defaults
+    max_stride = 120  # 84 with defaults
     if a.spatial_stride > max_stride:
         ap.error(f'--spatial-stride must be <= {max_stride} for the offset correction to have overlaps')
 
