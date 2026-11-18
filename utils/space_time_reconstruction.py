@@ -22,6 +22,8 @@ import numpy as np
 import scipy.linalg as sla
 import scipy.sparse as sp
 
+from utils.profiling import prof
+
 log = logging.getLogger(__name__).info
 
 
@@ -187,13 +189,15 @@ def predict_chunk(prep, filled, t0, Nt, engine, dataset_cls, batch_windows=2000,
     for s in range(0, W, batch_windows):
         e = min(s + batch_windows, W)
         ds = dataset_cls(x=LazyWindows(filled, o[s:e], N, t0, Nt), topo=prep['topo_w'][s:e])
-        out = np.asarray(engine.predict(data=ds, verbose=verbose))
+        with prof.section('predict.net'):
+            out = np.asarray(engine.predict(data=ds, verbose=verbose))
         out = out[..., 0] if out.ndim == 5 else out
         P[s:e] = out
     wv = prep['wvalid']
-    for k in range(W):
-        P[k][:, ~wv[k]] = np.nan
-    P -= P[:, :1].copy()  # increments relative to the first frame
+    with prof.section('predict.post'):
+        for k in range(W):
+            P[k][:, ~wv[k]] = np.nan
+        P -= P[:, :1].copy()  # increments relative to the first frame
     return P
 
 
@@ -368,16 +372,19 @@ def denoise_series(cube, topo, engine, dataset_cls, mask=None, N=128, Nt=9, spat
         raise ValueError('velocity_mode != none requires `velocity` (H,W; cube units/yr) and `dates` (decimal years)')
     if mask is None:
         mask = nan_all(cube)
-    prep = prepare_static(topo, mask, N, spatial_stride, edge_trim, min_overlap_frac, min_pixels)
+    with prof.section('setup.static'):
+        prep = prepare_static(topo, mask, N, spatial_stride, edge_trim, min_overlap_frac, min_pixels)
     H, Wd = prep['shape']
     W = len(prep['origins'])
-    fill_cube_inplace(cube, fill_range, seed)
+    with prof.section('setup.fill'):
+        fill_cube_inplace(cube, fill_range, seed)
 
-    t_starts = _starts(T, Nt, t_stride)
-    K = len(t_starts)
-    w = temporal_weights(Nt)
-    M = temporal_matrix(T, Nt, t_starts, w)
-    A, a = pair_incidence(prep)
+    with prof.section('setup.matrices'):
+        t_starts = _starts(T, Nt, t_stride)
+        K = len(t_starts)
+        w = temporal_weights(Nt)
+        M = temporal_matrix(T, Nt, t_starts, w)
+        A, a = pair_incidence(prep)
     log(f'{W} tiles, {len(prep["pairs"])} pairs, {K} chunks, max_lag={prep["max_lag"]}')
 
     rhs = np.zeros((T - 1, H, Wd), np.float32)
@@ -385,45 +392,57 @@ def denoise_series(cube, topo, engine, dataset_cls, mask=None, N=128, Nt=9, spat
     D_all = np.zeros((K, len(prep['pairs']), Nt - 1))
     t_loop = time.perf_counter()
     for k, t0 in enumerate(t_starts):
-        P = predict_chunk(prep, cube, int(t0), Nt, engine, dataset_cls, batch_windows, verbose)
-        D = overlap_medians(prep, P)
+        with prof.section('chunk.predict'):
+            P = predict_chunk(prep, cube, int(t0), Nt, engine, dataset_cls, batch_windows, verbose)
+        with prof.section('chunk.medians'):
+            D = overlap_medians(prep, P)
         D_all[k] = D
-        accumulate(R, np.concatenate([np.zeros((1, D.shape[0])), D.T], axis=0), int(t0), w)
-        accumulate(rhs, blend(prep, P), int(t0), w)
+        with prof.section('chunk.acc_R'):
+            accumulate(R, np.concatenate([np.zeros((1, D.shape[0])), D.T], axis=0), int(t0), w)
+        with prof.section('chunk.blend'):
+            Y = blend(prep, P)
+        with prof.section('chunk.acc_rhs'):
+            accumulate(rhs, Y, int(t0), w)
         del P
         eta = (time.perf_counter() - t_loop) / (k + 1) * (K - k - 1)
         log(f'chunk {k + 1}/{K} (frames {t0}-{t0 + Nt - 1}) ETA {eta / 60:.1f} min')
 
     # uncorrected field: u = M^-1 rhs
-    cf = sla.cho_factor(M)
-    flat = rhs.reshape(T - 1, -1)
-    for b in range(0, flat.shape[1], 20000):
-        flat[:, b:b + 20000] = sla.cho_solve(cf, flat[:, b:b + 20000])
+    with prof.section('solve.temporal'):
+        cf = sla.cho_factor(M)
+        flat = rhs.reshape(T - 1, -1)
+        for b in range(0, flat.shape[1], 20000):
+            flat[:, b:b + 20000] = sla.cho_solve(cf, flat[:, b:b + 20000])
     U = np.zeros((T, H, Wd), np.float32)
     U[1:] = rhs
     del rhs, flat
 
     # offsets
-    fs = factor_system(A, a, M)
-    E = solve_offsets(A, a, R.T, fs)
-    info = dict(n_tiles=W, n_windows=W, n_pairs=len(prep['pairs']), t_starts=t_starts, n_null_modes=fs['n_null'],
-                velocity_mode=velocity_mode)
-    info['rms_before'], info['rms_after'] = offset_residual(A, E, D_all, t_starts, Nt, a, w)
+    with prof.section('solve.factor'):
+        fs = factor_system(A, a, M)
+    with prof.section('solve.offsets'):
+        E = solve_offsets(A, a, R.T, fs)
+        info = dict(n_tiles=W, n_windows=W, n_pairs=len(prep['pairs']), t_starts=t_starts, n_null_modes=fs['n_null'],
+                    velocity_mode=velocity_mode)
+        info['rms_before'], info['rms_after'] = offset_residual(A, E, D_all, t_starts, Nt, a, w)
 
     g = None
     if velocity_mode != 'none':
         dates = np.asarray(dates, float)
         g = regression_weights(dates)
     if velocity_mode == 'before':
-        v_base = trend(U, g)
-        Q, qstar, ns = velocity_constraint(prep, v_base, velocity, velocity_order, velocity_subsample)
-        E = constrained_offsets(E, fs, g[1:], Q, qstar, velocity_weight)
-        info['rms_after_constrained'] = offset_residual(A, E, D_all, t_starts, Nt, a, w)[1]
-        info['velocity_samples'] = ns
-    interp_offsets(prep, E, U)
+        with prof.section('velocity.before'):
+            v_base = trend(U, g)
+            Q, qstar, ns = velocity_constraint(prep, v_base, velocity, velocity_order, velocity_subsample)
+            E = constrained_offsets(E, fs, g[1:], Q, qstar, velocity_weight)
+            info['rms_after_constrained'] = offset_residual(A, E, D_all, t_starts, Nt, a, w)[1]
+            info['velocity_samples'] = ns
+    with prof.section('assemble.interp'):
+        interp_offsets(prep, E, U)
     if velocity_mode == 'after':
-        info['velocity_correction'] = detrend_after(prep, U, g, dates, velocity,
-                                                    velocity_order, velocity_subsample)
+        with prof.section('velocity.after'):
+            info['velocity_correction'] = detrend_after(prep, U, g, dates, velocity,
+                                                        velocity_order, velocity_subsample)
     if velocity_mode != 'none':
         info['velocity_misfit_final'] = velocity_misfit(prep, U, g, velocity, velocity_order,
                                                         velocity_subsample)
