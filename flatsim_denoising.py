@@ -194,6 +194,8 @@ if __name__ == '__main__':
     tag = f'sstride{a.spatial_stride}_tstride{a.temporal_stride}_aggreg_median_staper_hann_ttaper_hann_v2'
     if a.velocity_mode != 'none':
         tag = tag + f'_vel_corr_{a.velocity_mode}_ord_{a.velocity_order}'
+    else:
+        tag = tag + f'_no_vel_corr'
     out_dir = os.path.join(a.out_dir, tag)
 
     inference_verbose = not a.inference_silent
