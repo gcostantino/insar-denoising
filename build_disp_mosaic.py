@@ -1,28 +1,33 @@
 #!/usr/bin/env python
-"""Build a sparse global mosaic of LOS velocity and cumulative displacement from the denoised FLATSIM series (.h5),
-separately for ascending / descending, with an optional inter-frame RATE offset correction.
+"""Build a sparse global mosaic of LOS velocity and cumulative displacement (last - first) from the denoised FLATSIM
+series (.h5), separately for ascending / descending, with optional inter-frame offset corrections.
 
-Per frame: rate = linear-regression slope over all epochs (mm/yr); cumulative = last - first epoch (mm).
-Both are binned to a global lon/lat grid (default cell = native pixel size).
+Per frame: rate = regression slope over all epochs (mm/yr); cumulative = last - first epoch (mm);
+detrended = cumulative - rate * span (mm), i.e. the departure of the net displacement from the linear trend
+(= residual of the regression at the last minus at the first epoch). All binned to a global lon/lat grid
+(default cell = native pixel size).
 
-Offset model (--offset-mode rate): one constant velocity offset r_i [mm/yr] per frame (the constant term that the
-reconstruction leaves free, because it depends on the reference). The real trend is NOT removed: it is common to
-both frames of an overlap and cancels in the difference. Observation of a pair (i, j):
-    obs_ij = median over the overlap cells of (rate_i - rate_j)  ~  r_i - r_j
-Weights 1/var_ij with  var_ij = sigma_sys^2 + s_ij^2 / n_eff,  s_ij = 1.4826 MAD of the overlap differences,
-n_eff = n_cells / corr_cells. sigma_sys is smaller for same-track pairs (same geometry and acquisitions).
-One weighted linear least-squares solve per orbit (minimum-norm, exact gauge per connected group of frames).
-Gauge: zero mean over the frames of --ref-track, or zero mean over the group if it has none.
-Correction: rate_corr = rate - r_i ; cumulative_corr = cumulative - r_i * span_i.
-No edge trimming; no robust reweighting. --reject-z > 0 optionally drops edges with |normalized residual| above the
-threshold once and re-solves.
+Frame errors in last - first:  r_i * span_i  (constant rate offset)  +  d_i  (nonlinear part: epoch-level constants).
+  rate offsets r_i [mm/yr]: obs_ij = median over the overlap of (rate_i - rate_j)          ~ r_i - r_j
+  level offsets d_i [mm]  : obs_ij = median over the overlap of (detrended_i - detrended_j) ~ d_i - d_j
+  (the detrended field is blind to r_i, so the two systems are independent.)
+--offset-mode none : raw mosaic only
+--offset-mode rate : r_i only.   rate_corr = rate - r_i ; cumulative_corr = cumulative - r_i*span_i
+--offset-mode full : r_i and d_i. rate_corr as above ; cumulative_corr = cumulative - r_i*span_i - d_i ;
+                     detrended_corr = detrended - d_i
+The real trend is NOT removed before the solves: it is common to both frames of an overlap and cancels.
+
+Weights 1/var_ij, var_ij = sigma_sys^2 + s_ij^2 / n_eff, s_ij = 1.4826 MAD of the overlap differences,
+n_eff = n_cells / corr_cells; sigma_sys is smaller for same-track pairs (same geometry and acquisitions).
+One weighted linear least-squares solve per orbit and per quantity (minimum-norm, exact gauge per connected group
+of frames: zero mean over the frames of --ref-track, or over the group if it has none). No edge trimming.
+--reject-z > 0 optionally drops edges with |normalized residual| above the threshold once and re-solves.
 
 Output .h5: per orbit sparse cells (raw fields and, if corrected, *_corr fields), /frames table, /pairs table.
 Units: mm and mm/yr, positive away from the satellite.
 
 Example:
-python build_disp_mosaic.py --results-dir results/ --out slip_mosaic.h5 --merge median \
-    --offset-mode rate --ref-track D004
+python build_disp_mosaic.py --results-dir results/ --out slip_mosaic.h5 --merge mean --offset-mode full --ref-track D004
 """
 import argparse
 import glob
@@ -159,8 +164,14 @@ def frame_products(f, dates_ord, res, nx_g, n_avg, block_elems):
 
 
 # ----------------------------------------------------------------------------- pair observations
+def _robust(dd, n, corr_cells, sigma_sys):
+    med = float(np.median(dd))
+    s = float(1.4826 * np.median(np.abs(dd - med)))
+    return med, s, sigma_sys ** 2 + s ** 2 / max(n / corr_cells, 1.0)
+
+
 def pair_observations(ks, meta, scratch, a):
-    """For every overlapping pair of frames (same orbit): median rate difference over the overlap cells."""
+    """For every overlapping pair of frames (same orbit): medians of the rate and detrended differences."""
     rows = []
     for ia_, i in enumerate(ks):
         for j in ks[ia_ + 1:]:
@@ -185,20 +196,23 @@ def pair_observations(ks, meta, scratch, a):
             if dsp > a.max_span_diff_days:
                 log(f' pair {i}-{j} dropped: spans differ by {dsp:.0f} d > {a.max_span_diff_days}')
                 continue
-            ri = np.asarray(np.load(f'{scratch}/rate_{i}.npy', mmap_mode='r')[si])[ia]
-            rj = np.asarray(np.load(f'{scratch}/rate_{j}.npy', mmap_mode='r')[sj])[ja]
-            v = np.isfinite(ri) & np.isfinite(rj)
+
+            def load(name, k, s, idx):
+                return np.asarray(np.load(f'{scratch}/{name}_{k}.npy', mmap_mode='r')[s])[idx].astype(np.float64)
+            ri, rj = load('rate', i, si, ia), load('rate', j, sj, ja)
+            ci, cj = load('cum', i, si, ia), load('cum', j, sj, ja)
+            di, dj = ci - ri * mi['span_yr'], cj - rj * mj['span_yr']
+            v = np.isfinite(ri) & np.isfinite(rj) & np.isfinite(ci) & np.isfinite(cj)
             n = int(v.sum())
             if n < a.min_overlap_cells:
                 log(f' pair {i}-{j} dropped: only {n} valid overlapping cells')
                 continue
-            dd = ri[v].astype(np.float64) - rj[v]
-            med = float(np.median(dd))
-            s = float(1.4826 * np.median(np.abs(dd - med)))
             same = track_id(track_label(mi['key'])) == track_id(track_label(mj['key']))
-            sys_ = a.sigma_sys_same_track if same else a.sigma_sys
-            var = sys_ ** 2 + s ** 2 / max(n / a.corr_cells, 1.0)
-            rows.append(dict(i=i, j=j, n=n, obs=med, s=s, var=var, same_track=int(same)))
+            obs, s, var = _robust(ri[v] - rj[v], n, a.corr_cells, a.sigma_sys_same_track if same else a.sigma_sys)
+            obs_d, s_d, var_d = _robust(di[v] - dj[v], n, a.corr_cells,
+                                        a.sigma_sys_det_same_track if same else a.sigma_sys_det)
+            rows.append(dict(i=i, j=j, n=n, obs=obs, s=s, var=var, obs_det=obs_d, s_det=s_d, var_det=var_d,
+                             same_track=int(same)))
     return rows
 
 
@@ -239,6 +253,20 @@ def solve_offsets(n, ea, eb, obs, var, ref):
     return out
 
 
+def solve_system(n, ea, eb, obs, var, ref, reject_z):
+    """solve_offsets, optionally dropping once the edges with |z| > reject_z. Returns sol and the 'used' mask."""
+    sol = solve_offsets(n, ea, eb, obs, var, ref)
+    used = np.ones(len(ea), bool)
+    if reject_z > 0 and len(ea):
+        used = np.abs(sol['z']) <= reject_z
+        if not used.all():
+            log(f' rejecting {int((~used).sum())} edge(s) with |z| > {reject_z}')
+            sol = solve_offsets(n, ea[used], eb[used], obs[used], var[used], ref)
+            sol['res'] = sol['x'][ea] - sol['x'][eb] - obs
+            sol['z'] = sol['res'] / np.sqrt(var)
+    return sol, used
+
+
 # ----------------------------------------------------------------------------- merging
 def grouped(ids, vals, merge):
     """Per-cell mean/median and std of vals (NaN ignored)."""
@@ -259,14 +287,16 @@ def grouped(ids, vals, merge):
 
 
 class SparseWriter:
-    DTYPES = dict(ix='i4', iy='i4', rate_mm_yr='f4', cumulative_mm='f4', rate_std_mm_yr='f4',
-                  n_frames='i2', n_valid='i2')
+    DTYPES = dict(ix='i4', iy='i4', rate_mm_yr='f4', cumulative_mm='f4', detrended_mm='f4', rate_std_mm_yr='f4',
+                  n_frames='i2', n_valid='i2', span_mean_yr='f4', span_range_yr='f4')
 
-    def __init__(self, grp, nx_g, corrected):
+    def __init__(self, grp, nx_g, mode):
         self.nx_g, self.n = nx_g, 0
         self.dtypes = dict(self.DTYPES)
-        if corrected:
+        if mode in ('rate', 'full'):
             self.dtypes.update(rate_corr_mm_yr='f4', cumulative_corr_mm='f4')
+        if mode == 'full':
+            self.dtypes.update(detrended_corr_mm='f4')
         self.ds = {k: grp.create_dataset(k, shape=(0,), maxshape=(None,), dtype=t, chunks=(65536,),
                                          compression='gzip', compression_opts=4, shuffle=True)
                    for k, t in self.dtypes.items()}
@@ -281,7 +311,8 @@ class SparseWriter:
         self.n += m
 
 
-def merge_orbit(ks, scratch, off_rate, off_cum, nx_g, band_rows, merge, writer, corrected):
+def merge_orbit(ks, scratch, span, off_rate, off_cum, off_det, nx_g, band_rows, merge, writer, mode):
+    """off_rate [mm/yr], off_cum [mm] (total correction of last - first), off_det [mm], all indexed by frame."""
     ids_mm = {k: np.load(f'{scratch}/ids_{k}.npy', mmap_mode='r') for k in ks}
     rate_mm = {k: np.load(f'{scratch}/rate_{k}.npy', mmap_mode='r') for k in ks}
     cum_mm = {k: np.load(f'{scratch}/cum_{k}.npy', mmap_mode='r') for k in ks}
@@ -303,12 +334,21 @@ def merge_orbit(ks, scratch, off_rate, off_cum, nx_g, band_rows, merge, writer, 
         if not pi:
             continue
         ids, rate, cum, fid = map(np.concatenate, (pi, pr, pc, pf))
+        sp_ = span[fid]
+        det = cum - rate * sp_
         uniq, r_m, r_s, k_valid, cnt = grouped(ids, rate, merge)
+        order = np.argsort(ids, kind='stable')
+        start = np.unique(ids[order], return_index=True)[1]
+        sps = sp_[order]
         out = dict(ids=uniq, rate_mm_yr=r_m, rate_std_mm_yr=r_s, n_valid=k_valid, n_frames=cnt,
-                   cumulative_mm=grouped(ids, cum, merge)[1])
-        if corrected:
+                   cumulative_mm=grouped(ids, cum, merge)[1], detrended_mm=grouped(ids, det, merge)[1],
+                   span_mean_yr=np.add.reduceat(sps, start) / cnt,
+                   span_range_yr=np.maximum.reduceat(sps, start) - np.minimum.reduceat(sps, start))
+        if mode in ('rate', 'full'):
             out['rate_corr_mm_yr'] = grouped(ids, rate - off_rate[fid], merge)[1]
             out['cumulative_corr_mm'] = grouped(ids, cum - off_cum[fid], merge)[1]
+        if mode == 'full':
+            out['detrended_corr_mm'] = grouped(ids, det - off_det[fid], merge)[1]
         writer.append(out)
 
 
@@ -327,12 +367,15 @@ def main():
     ap.add_argument('--merge', choices=['mean', 'median'], default='mean', help='how overlapping frames are combined')
     ap.add_argument('--res', type=float, default=None, help='cell size in degrees (default: native pixel size)')
     ap.add_argument('--n-avg', type=int, default=1, help='epochs averaged at each end of the cumulative (1 = literal)')
-    ap.add_argument('--offset-mode', choices=['none', 'rate'], default='none', help='inter-frame rate offset correction')
+    ap.add_argument('--offset-mode', choices=['none', 'rate', 'full'], default='none',
+                    help='none | rate (r_i only) | full (r_i and the level offsets d_i of the detrended field)')
     ap.add_argument('--ref-track', default=None, help='substring of the track label (e.g. D004) used as reference')
     ap.add_argument('--min-overlap-cells', type=int, default=500)
     ap.add_argument('--max-span-diff-days', type=float, default=90., help='ignore pairs whose spans differ more')
-    ap.add_argument('--sigma-sys', type=float, default=0.3, help='systematic std of a cross-track pair (mm/yr)')
-    ap.add_argument('--sigma-sys-same-track', type=float, default=0.1, help='same for same-track pairs (mm/yr)')
+    ap.add_argument('--sigma-sys', type=float, default=0.3, help='systematic std of a cross-track pair, rate (mm/yr)')
+    ap.add_argument('--sigma-sys-same-track', type=float, default=0.1, help='same, same-track pairs (mm/yr)')
+    ap.add_argument('--sigma-sys-det', type=float, default=2.0, help='systematic std, detrended field, cross-track (mm)')
+    ap.add_argument('--sigma-sys-det-same-track', type=float, default=0.7, help='same, same-track pairs (mm)')
     ap.add_argument('--corr-cells', type=float, default=2500., help='cells per independent sample in an overlap')
     ap.add_argument('--reject-z', type=float, default=0., help='>0: drop edges with |z| above this once, re-solve')
     ap.add_argument('--block-elems', type=float, default=1e7, help='elements per block when reading a series')
@@ -396,11 +439,14 @@ def main():
     if not meta:
         raise SystemExit('no usable frame')
 
-    off_rate, off_cum = np.zeros(len(meta)), np.zeros(len(meta))
+    mode = a.offset_mode
+    span_all = np.array([m['span_yr'] for m in meta])
+    off_rate, off_det = np.zeros(len(meta)), np.zeros(len(meta))
     for m in meta:
-        m.update(offset_rate_mm_yr=0.0, offset_cum_mm=0.0, offset_group=-1, offset_is_reference=0, offset_n_pairs=0)
+        m.update(offset_rate_mm_yr=0.0, offset_det_mm=0.0, offset_cum_mm=0.0, offset_group=-1,
+                 offset_is_reference=0, offset_n_pairs=0)
     pair_rows, orbit_stats = [], {}
-    if a.offset_mode == 'rate':
+    if mode != 'none':
         for orbit in ORBITS:
             ks = [i for i, m in enumerate(meta) if m['orbit'] == orbit]
             if len(ks) < 2:
@@ -413,56 +459,56 @@ def main():
                 log(f' note: no {orbit} frame matches --ref-track "{a.ref_track}", using zero mean per group')
             ea = np.array([loc[r['i']] for r in rows], int)
             eb = np.array([loc[r['j']] for r in rows], int)
-            obs = np.array([r['obs'] for r in rows])
-            var = np.array([r['var'] for r in rows])
-            sol = solve_offsets(len(ks), ea, eb, obs, var, ref)
-            if a.reject_z > 0 and len(rows):
-                keep = np.abs(sol['z']) <= a.reject_z
-                if not keep.all():
-                    log(f' rejecting {int((~keep).sum())} edge(s) with |z| > {a.reject_z}')
-                    sol2 = solve_offsets(len(ks), ea[keep], eb[keep], obs[keep], var[keep], ref)
-                    res_all = (np.eye(len(ks))[ea] - np.eye(len(ks))[eb]) @ sol2['x'] - obs
-                    sol2['res'], sol2['z'] = res_all, res_all / np.sqrt(var)
-                    sol, rows_keep = sol2, keep
-                else:
-                    rows_keep = keep
-            else:
-                rows_keep = np.ones(len(rows), bool)
+            systems = {'rate': ('obs', 'var', 'mm/yr')}
+            if mode == 'full':
+                systems['det'] = ('obs_det', 'var_det', 'mm')
+            sols = {}
+            for name, (ko, kv, unit) in systems.items():
+                obs = np.array([r[ko] for r in rows])
+                var = np.array([r[kv] for r in rows])
+                sol, used = solve_system(len(ks), ea, eb, obs, var, ref, a.reject_z)
+                sols[name] = (sol, used, obs, var)
+                orbit_stats[(orbit, name)] = (sol.get('rms_before', np.nan), sol.get('rms_after', np.nan), len(rows),
+                                              sol['n_groups'], sol['n_cycles'], sol.get('chi2_per_cycle', np.nan))
+                log(f' {orbit} [{name}]: {len(rows)} pairs, {sol["n_groups"]} group(s), {sol["n_cycles"]} cycle(s); '
+                    f'weighted RMS {orbit_stats[(orbit, name)][0]:.3f} -> {orbit_stats[(orbit, name)][1]:.3f} {unit}, '
+                    f'chi2/cycle {orbit_stats[(orbit, name)][5]:.2f}')
+                for r, z_ in zip(rows, sol['z']):
+                    if abs(z_) > 4:
+                        log(f' LARGE RESIDUAL [{name}] {track_label(meta[r["i"]]["key"])} / '
+                            f'{track_label(meta[r["j"]]["key"])}: z = {z_:+.1f}')
+            sr = sols['rate'][0]
+            sd = sols['det'][0] if 'det' in sols else None
             for n_, k in enumerate(ks):
-                x = float(sol['x'][n_])
-                off_rate[k], off_cum[k] = x, x * meta[k]['span_yr']
-                meta[k].update(offset_rate_mm_yr=x, offset_cum_mm=x * meta[k]['span_yr'],
-                               offset_group=int(sol['comp'][n_]), offset_is_reference=int(sol['is_ref'][n_]),
-                               offset_n_pairs=int(sol['deg'][n_]))
-            for r, z_, res_, kp in zip(rows, sol['z'], sol['res'], rows_keep):
-                pair_rows.append(dict(frame_i=r['i'], frame_j=r['j'], key_i=meta[r['i']]['key'],
-                                      key_j=meta[r['j']]['key'], orbit=orbit, n_cells=r['n'], obs=r['obs'],
-                                      sigma=float(np.sqrt(r['var'])), same_track=r['same_track'],
-                                      resid=float(res_), z=float(z_), used=int(kp)))
-            orbit_stats[orbit] = (sol.get('rms_before', np.nan), sol.get('rms_after', np.nan), len(rows),
-                                  sol['n_groups'], sol['n_cycles'], sol.get('chi2_per_cycle', np.nan))
-            log(f' {orbit}: {len(rows)} pairs, {sol["n_groups"]} group(s), {sol["n_cycles"]} independent cycle(s); '
-                f'weighted RMS {orbit_stats[orbit][0]:.3f} -> {orbit_stats[orbit][1]:.3f} mm/yr, '
-                f'chi2/cycle {orbit_stats[orbit][5]:.2f}')
-            for n_, k in enumerate(ks):
-                tag = 'REF ' if sol['is_ref'][n_] else '    '
-                warn = ' <- not connected, left uncorrected' if sol['deg'][n_] == 0 else ''
-                log(f' {tag}{track_label(meta[k]["key"]):<28} offset {sol["x"][n_]:+7.3f} mm/yr '
-                    f'(cumulative {off_cum[k]:+8.2f} mm, {int(sol["deg"][n_])} pairs){warn}')
-            for r, z_ in zip(rows, sol['z']):
-                if abs(z_) > 4:
-                    log(f' LARGE RESIDUAL pair {track_label(meta[r["i"]]["key"])} / {track_label(meta[r["j"]]["key"])}: '
-                        f'z = {z_:+.1f}')
+                r_i = float(sr['x'][n_])
+                d_i = float(sd['x'][n_]) if sd is not None else 0.0
+                off_rate[k], off_det[k] = r_i, d_i
+                meta[k].update(offset_rate_mm_yr=r_i, offset_det_mm=d_i, offset_cum_mm=r_i * meta[k]['span_yr'] + d_i,
+                               offset_group=int(sr['comp'][n_]), offset_is_reference=int(sr['is_ref'][n_]),
+                               offset_n_pairs=int(sr['deg'][n_]))
+                tag = 'REF ' if sr['is_ref'][n_] else '    '
+                warn = ' <- not connected, left uncorrected' if sr['deg'][n_] == 0 else ''
+                log(f' {tag}{track_label(meta[k]["key"]):<28} rate offset {r_i:+7.3f} mm/yr'
+                    + (f', level offset {d_i:+7.2f} mm' if sd is not None else '')
+                    + f' (cumulative {meta[k]["offset_cum_mm"]:+8.2f} mm, {int(sr["deg"][n_])} pairs){warn}')
+            for e_, r in enumerate(rows):
+                row = dict(frame_i=r['i'], frame_j=r['j'], key_i=meta[r['i']]['key'], key_j=meta[r['j']]['key'],
+                           orbit=orbit, n_cells=r['n'], same_track=r['same_track'])
+                for name, (sol, used, obs, var) in sols.items():
+                    row.update({f'obs_{name}': float(obs[e_]), f'sigma_{name}': float(np.sqrt(var[e_])),
+                                f'resid_{name}': float(sol['res'][e_]), f'z_{name}': float(sol['z'][e_]),
+                                f'used_{name}': int(used[e_])})
+                pair_rows.append(row)
+    off_cum = off_rate * span_all + off_det
 
-    corrected = a.offset_mode != 'none'
     band_rows = max(1, int(round(a.band_deg / res)))
     with h5py.File(a.out, 'w') as out:
         for orbit in ORBITS:
             ks = [i for i, m in enumerate(meta) if m['orbit'] == orbit]
             if not ks:
                 continue
-            w = SparseWriter(out.create_group(orbit), nx_g, corrected)
-            merge_orbit(ks, scratch, off_rate, off_cum, nx_g, band_rows, a.merge, w, corrected)
+            w = SparseWriter(out.create_group(orbit), nx_g, mode)
+            merge_orbit(ks, scratch, span_all, off_rate, off_cum, off_det, nx_g, band_rows, a.merge, w, mode)
             out[orbit].attrs['n_cells'] = w.n
             out[orbit].attrs['n_frames'] = len(ks)
             log(f'{orbit}: {w.n} occupied cells written')
@@ -476,20 +522,23 @@ def main():
         out.attrs.update(dict(
             res_deg=res, lon0=LON0, lat0=LAT0, nx_global=nx_g, merge=a.merge, n_avg=a.n_avg,
             units_cumulative='mm', units_rate='mm/yr',
-            convention='LOS, positive away from the satellite; rate = regression slope, cumulative = last - first',
+            convention=('LOS, positive away from the satellite; rate = regression slope, cumulative = last - first, '
+                        'detrended = cumulative - rate * span'),
             cell_definition='cell (ix, iy) spans lon [lon0+ix*res, lon0+(ix+1)*res), lat [lat0+iy*res, lat0+(iy+1)*res)',
             geometry_policy='pixels with non-finite lon/lat or lon=lat=0 are ignored; frame boxes from unmasked pixels',
-            offset_mode=a.offset_mode, ref_track=a.ref_track or '', min_overlap_cells=a.min_overlap_cells,
-            sigma_sys=a.sigma_sys, sigma_sys_same_track=a.sigma_sys_same_track, corr_cells=a.corr_cells,
+            offset_mode=mode, ref_track=a.ref_track or '', min_overlap_cells=a.min_overlap_cells,
+            sigma_sys=a.sigma_sys, sigma_sys_same_track=a.sigma_sys_same_track, sigma_sys_det=a.sigma_sys_det,
+            sigma_sys_det_same_track=a.sigma_sys_det_same_track, corr_cells=a.corr_cells,
             reject_z=a.reject_z, source_dir=os.path.abspath(a.results_dir), created=datetime.now().isoformat()))
-        if corrected:
-            out.attrs['offset_note'] = ('corrected = raw - offset; rate offset in mm/yr (offset_rate_mm_yr), '
-                                        'cumulative offset = rate offset * span (offset_cum_mm). Relative to the '
-                                        'reference frames or zero-mean per group.')
-            for orbit, (rb, ra, ne, ng, nc, chi) in orbit_stats.items():
-                out.attrs.update({f'rms_overlap_before_{orbit}': rb, f'rms_overlap_after_{orbit}': ra,
-                                  f'n_pairs_{orbit}': ne, f'n_groups_{orbit}': ng, f'n_cycles_{orbit}': nc,
-                                  f'chi2_per_cycle_{orbit}': chi})
+        if mode != 'none':
+            out.attrs['offset_note'] = ('error of last - first = rate_offset*span + level_offset. rate: corrected = raw - '
+                                        'rate_offset. cumulative: corrected = raw - offset_cum_mm (rate_offset*span, plus '
+                                        'level_offset in mode full). detrended (mode full): corrected = raw - level_offset. '
+                                        'Relative to the reference frames or zero-mean per group.')
+            for (orbit, name), (rb, ra, ne, ng, nc, chi) in orbit_stats.items():
+                out.attrs.update({f'rms_overlap_before_{name}_{orbit}': rb, f'rms_overlap_after_{name}_{orbit}': ra,
+                                  f'n_pairs_{orbit}': ne, f'n_groups_{orbit}': ng, f'n_cycles_{name}_{orbit}': nc,
+                                  f'chi2_per_cycle_{name}_{orbit}': chi})
     if not a.keep_scratch:
         shutil.rmtree(scratch, ignore_errors=True)
     log(f'saved {a.out} ({os.path.getsize(a.out) / 1e6:.1f} MB)')
