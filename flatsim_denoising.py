@@ -200,7 +200,7 @@ if __name__ == '__main__':
     if a.solve_tilt and a.velocity_mode == 'before':
         ap.error("--solve-tilt is not available with --velocity-mode before (use 'after' and/or --fit-plane)")
 
-    EMPTY_MODE = a.empty
+    EMPTY_MODE = a.empty_mode
 
     cfg = dict(DENOISE_CFG)
     cfg.update(spatial_stride=a.spatial_stride, t_stride=a.temporal_stride, batch_windows=batch_windows,
