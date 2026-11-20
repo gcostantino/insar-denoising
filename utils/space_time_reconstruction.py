@@ -2,17 +2,25 @@
 Reconstruct a displacement series U(t, y, x) from overlapping space-time denoiser outputs.
 
 Model:
-    P_{k,w}(tau, x) = [U(t_k+tau, x) - U(t_k, x)] - [e_w(t_k+tau) - e_w(t_k)] + noise
-with one unknown offset time series e_w(t) per spatial tile w (e_w(0)=0).
-  1. pass 1 (network): per chunk, accumulate the uncorrected field U_base and the overlap medians
-     D_{k,(i,j)}(tau) = median_overlap(P_j - P_i)
-  2. one sparse/separable linear solve for E = {e_w(t)}  (optionally constrained by the velocity)
-  3. U = U_base + Interp(E)                      (exact, because blend weights are static)
-  4. optionally 'after': low-order velocity detrending of U
+P_{k,w}(tau, x) = [U(t_k+tau, x) - U(t_k, x)] - [f_w(t_k+tau, x) - f_w(t_k, x)] + noise
+with one unknown field per spatial tile w and epoch t (f_w(0) = 0):
+  - offsets only (default):  f_w = a_w(t)
+  - offsets + tilt (solve_tilt=True):  f_w = a_w(t) + gy_w(t) * eta_y + gx_w(t) * eta_x,
+    eta = (pixel - tile centre) / (N/2) in [-1, 1] (gy, gx in data units per half tile).
+1. pass 1 (network): per chunk, accumulate the uncorrected field U_base and the overlap statistics
+   D_{k,(i,j)}(tau): median of (P_j - P_i) over the overlap (offsets), or the robust plane fitted to (P_j - P_i)
+   over the overlap (offsets + tilt: value at the overlap centre and the two slopes)
+2. one linear solve, separable in space and time, for the tile fields (optionally constrained by the velocity)
+3. U = U_base + Interp(tile fields)                      (exact, because blend weights are static)
+4. optionally 'after': low-order velocity detrending of U
+5. optionally fit_plane: remove the best-fit plane (gradients only) of every epoch of the final U
 
-velocity_mode:  'none'   -> no velocity information used
-                'before' -> low-order velocity constraint inside the offset solve
-                'after'  -> low-order velocity detrending of the final series
+velocity_mode: 'none'   -> no velocity information used
+               'before' -> low-order velocity constraint inside the offset solve (not available with solve_tilt)
+               'after'  -> low-order velocity detrending of the final series
+Without an outside constraint the overlaps cannot determine the global plane of each epoch (a systematic tilt of all
+tiles is absorbed exactly); with solve_tilt this becomes an explicit gauge (min-norm solution) that velocity_mode='after'
+and/or fit_plane then fix.
 Units: `velocity` must be in cube-units per year (cube is in cm in flatsim_denoising.py).
 """
 import logging
@@ -21,6 +29,7 @@ import time
 import numpy as np
 import scipy.linalg as sla
 import scipy.sparse as sp
+from scipy.sparse.linalg import splu
 
 from utils.profiling import prof
 
@@ -108,7 +117,7 @@ def temporal_matrix(T, Nt, t_starts, w, ridge=1e-9):
 
 
 def accumulate(rhs, Y, tk, w):
-    """rhs += B_k^T W Y_k.  Y: (Nt, ...), rhs: (T-1, ...)."""
+    """rhs += B_k^T W Y_k. Y: (Nt, ...), rhs: (T-1, ...)."""
     for tau in range(1, Y.shape[0]):
         val = np.nan_to_num(Y[tau]) * w[tau - 1]
         rhs[tk + tau - 1] += val
@@ -197,7 +206,7 @@ def predict_chunk(prep, filled, t0, Nt, engine, dataset_cls, batch_windows=2000,
     with prof.section('predict.post'):
         for k in range(W):
             P[k][:, ~wv[k]] = np.nan
-        P -= P[:, :1].copy()  # increments relative to the first frame
+        P -= P[:, :1].copy()                      # increments relative to the first frame
     return P
 
 
@@ -253,7 +262,7 @@ def factor_system(A, a, M, tol=1e-10):
 
 
 def solve_offsets(A, a, R, fs):
-    """Solve  L E M = A^T diag(a) R  (E: W x (T-1)); zero-mean gauge per connected component."""
+    """Solve L E M = A^T diag(a) R (E: W x (T-1)); zero-mean gauge per connected component."""
     C = A.T @ (a[:, None] * R)
     Z = fs['Vs'][:, fs['keep_s']].T @ C @ fs['Vt']
     Z = Z / (fs['ls'][fs['keep_s']][:, None] * fs['lt'][None, :])
@@ -262,15 +271,123 @@ def solve_offsets(A, a, R, fs):
 
 def offset_residual(A, E, D_all, t_starts, Nt, a, w):
     """Weighted rms of D_{k,p}(tau) - model, and of D itself."""
-    G = np.concatenate([np.zeros((A.shape[0], 1)), A @ E], axis=1)  # (P, T)
+    G = np.concatenate([np.zeros((A.shape[0], 1)), A @ E], axis=1)      # (P, T)
     tk = np.asarray(t_starts)[:, None]
     tt = tk + np.arange(1, Nt)[None]
-    Dhat = (G[:, tt] - G[:, tk][:, :, :])  # (P, K, Nt-1)
-    Dhat = np.transpose(Dhat, (1, 0, 2))  # (K, P, Nt-1)
+    Dhat = (G[:, tt] - G[:, tk][:, :, :])                                # (P, K, Nt-1)
+    Dhat = np.transpose(Dhat, (1, 0, 2))                                 # (K, P, Nt-1)
     ww = a[None, :, None] * w[None, None, :]
     ww = np.broadcast_to(ww, D_all.shape)
     return (float(np.sqrt((ww * D_all ** 2).sum() / ww.sum())),
             float(np.sqrt((ww * (D_all - Dhat) ** 2).sum() / ww.sum())))
+
+
+# ----------------------------------------------------------------------------- offsets + tilt
+def pair_geometry(prep):
+    """Static per-pair quantities for the tilt model: plane basis over the overlap pixels (coordinates relative to the
+    overlap centre, in units of N/2) and the offsets of the overlap centre from the two tile centres."""
+    N = prep['N']
+    h = N / 2.0
+    origins = prep['origins']
+    geo = []
+    for (i, j, ai, aj, sel) in prep['pairs']:
+        yi, xi = origins[i]
+        yj, xj = origins[j]
+        ww = ai[3] - ai[2]
+        rows = yi + ai[0] + sel // ww
+        cols = xi + ai[2] + sel % ww
+        yo, xo = rows.mean(), cols.mean()
+        v, u = (rows - yo) / h, (cols - xo) / h
+        Psi = np.stack([np.ones(len(sel)), v, u], axis=1)
+        geo.append(dict(Psi=Psi, G=np.linalg.pinv(Psi),
+                        d=((yo - (yi + (N - 1) / 2)) / h, (xo - (xi + (N - 1) / 2)) / h,
+                           (yo - (yj + (N - 1) / 2)) / h, (xo - (xj + (N - 1) / 2)) / h),
+                        var=(float(v.var()), float(u.var()))))
+    return geo
+
+
+def pair_incidence_tilt(prep, geo, a):
+    """A3 (3P x 3W): rows (c0, cy, cx) of every pair, columns (a, gy, gx) of every tile; ws: row weights.
+    c0 = value of the overlap difference at the overlap centre, cy/cx = its slopes (per N/2)."""
+    pairs = prep['pairs']
+    P_, W = len(pairs), len(prep['origins'])
+    rows, cols, vals = [], [], []
+    ws = np.zeros(3 * P_)
+    for p, ((i, j, *_), g) in enumerate(zip(pairs, geo)):
+        dyi, dxi, dyj, dxj = g['d']
+        r = 3 * p
+        rows += [r] * 6
+        cols += [3 * i, 3 * i + 1, 3 * i + 2, 3 * j, 3 * j + 1, 3 * j + 2]
+        vals += [1., dyi, dxi, -1., -dyj, -dxj]
+        rows += [r + 1, r + 1, r + 2, r + 2]
+        cols += [3 * i + 1, 3 * j + 1, 3 * i + 2, 3 * j + 2]
+        vals += [1., -1., 1., -1.]
+        ws[r], ws[r + 1], ws[r + 2] = a[p], a[p] * max(g['var'][0], 1e-3), a[p] * max(g['var'][1], 1e-3)
+    return sp.csr_matrix((vals, (rows, cols)), shape=(3 * P_, 3 * W)), ws
+
+
+def overlap_planes(prep, geo, P, clip=3.0):
+    """D3[p, :, tau-1] = (c0, cy, cx): plane fitted to (P_j - P_i) over the overlap (one 3-sigma clipping pass)."""
+    Nt = P.shape[1]
+    out = np.zeros((len(prep['pairs']), 3, Nt - 1))
+    for p, ((i, j, ai, aj, sel), g) in enumerate(zip(prep['pairs'], geo)):
+        a = P[i][:, ai[0]:ai[1], ai[2]:ai[3]].reshape(Nt, -1)[:, sel]
+        b = P[j][:, aj[0]:aj[1], aj[2]:aj[3]].reshape(Nt, -1)[:, sel]
+        d = np.nan_to_num((b - a)[1:].T.astype(np.float64))                  # (n, Nt-1)
+        coef = g['G'] @ d
+        if clip:
+            r = d - g['Psi'] @ coef
+            s = 1.4826 * np.median(np.abs(r - np.median(r, axis=0)), axis=0) + 1e-12
+            wgt = (np.abs(r) <= clip * s).astype(np.float64)
+            Mt = np.einsum('np,nt,nq->tpq', g['Psi'], wgt, g['Psi'], optimize=True)
+            bt = np.einsum('np,nt,nt->tp', g['Psi'], wgt, d, optimize=True)
+            try:
+                coef = np.linalg.solve(Mt, bt[..., None])[..., 0].T
+            except np.linalg.LinAlgError:
+                pass
+        out[p] = coef
+    return out
+
+
+def factor_tilt(A3, ws, M, prior=0.0, eps_rel=1e-8):
+    """Sparse LU of L3 = A3^T diag(ws) A3 (+ tiny ridge = min-norm gauge, + optional ridge on the tilts) and the
+    eigendecomposition of M. In the eigenbasis of M the space-time system decouples into one L3 system per mode."""
+    L3 = (A3.T @ sp.diags(ws) @ A3).tocsc()
+    n3 = L3.shape[0]
+    d = L3.diagonal()
+    if prior > 0:
+        tilt = (np.arange(n3) % 3 != 0).astype(float)
+        L3 = L3 + sp.diags(prior * d[tilt == 0].mean() * tilt)
+    lu = splu((L3 + eps_rel * d.max() * sp.eye(n3)).tocsc())
+    lt, Vt = np.linalg.eigh(M)
+    return dict(lu=lu, lt=lt, Vt=Vt)
+
+
+def solve_tilt_system(A3, ws, R3, ft):
+    """Theta (3W x (T-1)) from  L3 Theta M = A3^T diag(ws) R3; R3: (3P, T-1) accumulated observations."""
+    C = A3.T @ (ws[:, None] * R3)
+    Th = ft['lu'].solve(np.ascontiguousarray(C @ ft['Vt'])) / ft['lt'][None, :]
+    return Th @ ft['Vt'].T
+
+
+def tilt_residual(A3, Theta, D3_all, t_starts, Nt, ws, w):
+    """Weighted rms of the 3-row observations and of their residual after the fit; D3_all: (K, 3P, Nt-1)."""
+    G = np.concatenate([np.zeros((A3.shape[0], 1)), A3 @ Theta], axis=1)
+    tk = np.asarray(t_starts)[:, None]
+    tt = tk + np.arange(1, Nt)[None]
+    Dhat = np.transpose(G[:, tt] - G[:, tk], (1, 0, 2))
+    ww = np.broadcast_to(ws[None, :, None] * w[None, None, :], D3_all.shape)
+    return (float(np.sqrt((ww * D3_all ** 2).sum() / ww.sum())),
+            float(np.sqrt((ww * (D3_all - Dhat) ** 2).sum() / ww.sum())))
+
+
+def interp_offsets_tilt(prep, Theta, out):
+    """out[1:] += sum_w hhat_w(x) [a_w(t) + gy_w(t) eta_y + gx_w(t) eta_x]; Theta: (W, 3, T-1)."""
+    N = prep['N']
+    eta = ((np.arange(N) - (N - 1) / 2) / (N / 2)).astype(np.float32)
+    for k, (y, x) in enumerate(prep['origins']):
+        a, gy, gx = (Theta[k, r].astype(np.float32)[:, None, None] for r in range(3))
+        out[1:, y:y + N, x:x + N] += (a + gy * eta[None, :, None] + gx * eta[None, None, :]) * prep['hhat'][k][None]
 
 
 # ----------------------------------------------------------------------------- velocity
@@ -322,7 +439,7 @@ def velocity_constraint(prep, v_base, velocity, order, sub):
         m = sub_i >= 0
         Hs[sub_i[m], k] = prep['hhat'][k][m]
     Q = (pinv @ Hs)[1:]
-    Q = Q - Q.mean(axis=1, keepdims=True)  # orthogonal to the uniform (gauge) mode
+    Q = Q - Q.mean(axis=1, keepdims=True)           # orthogonal to the uniform (gauge) mode
     return Q, (pinv @ d)[1:], len(yy)
 
 
@@ -358,18 +475,59 @@ def velocity_misfit(prep, U, g, velocity, order, sub):
     return np.linalg.lstsq(Psi, d, rcond=None)[0][1:]
 
 
+# ----------------------------------------------------------------------------- plane fit of every epoch
+def fit_plane_epochs(prep, U, order=1, sub=4, nsigma=3., iters=3):
+    """Fit, for every epoch, a robust polynomial (plane for order 1) to the final U on a subsampled valid grid and
+    subtract its non-constant terms (the per-epoch constant is left untouched). In place. Returns the removed
+    coefficients, shape (T, nb-1): columns (u = range, v = azimuth, [u^2, uv, v^2]) per unit of normalised
+    coordinate in [-1, 1] over the frame, in the units of U."""
+    T = U.shape[0]
+    H, Wd = prep['shape']
+    yy, xx = np.mgrid[0:H:sub, 0:Wd:sub]
+    ok = prep['den'][yy, xx] > 0
+    yi, xi = yy[ok], xx[ok]
+    Psi = _basis(yi.astype(float), xi.astype(float), (H, Wd), order)
+    nb = Psi.shape[1]
+    Y, X = np.mgrid[0:H, 0:Wd]
+    v = (2 * Y / max(H - 1, 1) - 1).astype(np.float32)
+    u = (2 * X / max(Wd - 1, 1) - 1).astype(np.float32)
+    coefs = np.zeros((T, nb - 1))
+    for t in range(1, T):
+        d = U[t][yi, xi].astype(np.float64)
+        use = np.isfinite(d)
+        for _ in range(iters):
+            c = np.linalg.lstsq(Psi[use], d[use], rcond=None)[0]
+            r = d - Psi @ c
+            s = 1.4826 * np.median(np.abs(r[use] - np.median(r[use]))) + 1e-12
+            use = np.isfinite(d) & (np.abs(r) < nsigma * s)
+        c = np.linalg.lstsq(Psi[use], d[use], rcond=None)[0]
+        coefs[t] = c[1:]
+        terms = [u, v] + ([u * u, u * v, v * v] if order >= 2 else [])
+        for ck, tk_ in zip(c[1:], terms):
+            U[t] -= np.float32(ck) * tk_
+    return coefs
+
+
 # ----------------------------------------------------------------------------- driver
 def denoise_series(cube, topo, engine, dataset_cls, mask=None, N=128, Nt=9, spatial_stride=64,
                    t_stride=2, edge_trim=8, min_overlap_frac=0.25, min_pixels=200,
                    fill_range=10., seed=0, batch_windows=2000, verbose=True,
                    velocity=None, dates=None, velocity_mode='none', velocity_order=1,
-                   velocity_weight=np.inf, velocity_subsample=4):
-    """cube: (T,H,W) float32 (modified in place: NaNs filled). Returns U (T,H,W), info."""
+                   velocity_weight=np.inf, velocity_subsample=4,
+                   solve_tilt=False, tilt_prior=0.0, fit_plane=False, plane_order=1, plane_subsample=4):
+    """cube: (T,H,W) float32 (modified in place: NaNs filled). Returns U (T,H,W), info.
+
+    solve_tilt: also invert for a tilt (gy, gx) per tile and epoch, not only the offset (tilt_prior > 0 adds a weak
+                ridge on the tilts). Not available with velocity_mode='before'.
+    fit_plane:  after the whole reconstruction, fit a plane (plane_order=1; 2 = quadratic) to every epoch of U and
+                remove its gradient terms (the per-epoch constant is kept)."""
     assert velocity_mode in ('none', 'before', 'after')
     T = cube.shape[0]
     assert T >= Nt and 1 <= t_stride <= Nt - 1
     if velocity_mode != 'none' and (velocity is None or dates is None):
         raise ValueError('velocity_mode != none requires `velocity` (H,W; cube units/yr) and `dates` (decimal years)')
+    if solve_tilt and velocity_mode == 'before':
+        raise ValueError("solve_tilt is not available with velocity_mode='before' (use 'after' and/or fit_plane)")
     if mask is None:
         mask = nan_all(cube)
     with prof.section('setup.static'):
@@ -385,17 +543,23 @@ def denoise_series(cube, topo, engine, dataset_cls, mask=None, N=128, Nt=9, spat
         w = temporal_weights(Nt)
         M = temporal_matrix(T, Nt, t_starts, w)
         A, a = pair_incidence(prep)
-    log(f'{W} tiles, {len(prep["pairs"])} pairs, {K} chunks, max_lag={prep["max_lag"]}')
+        P_ = len(prep['pairs'])
+        if solve_tilt:
+            geo = pair_geometry(prep)
+            A3, ws = pair_incidence_tilt(prep, geo, a)
+    log(f'{W} tiles, {P_} pairs, {K} chunks, max_lag={prep["max_lag"]}, solve_tilt={solve_tilt}, '
+        f'fit_plane={fit_plane}')
 
     rhs = np.zeros((T - 1, H, Wd), np.float32)
-    R = np.zeros((T - 1, len(prep['pairs'])))
-    D_all = np.zeros((K, len(prep['pairs']), Nt - 1))
+    nrow = 3 * P_ if solve_tilt else P_
+    R = np.zeros((T - 1, nrow))
+    D_all = np.zeros((K, nrow, Nt - 1))
     t_loop = time.perf_counter()
     for k, t0 in enumerate(t_starts):
         with prof.section('chunk.predict'):
             P = predict_chunk(prep, cube, int(t0), Nt, engine, dataset_cls, batch_windows, verbose)
-        with prof.section('chunk.medians'):
-            D = overlap_medians(prep, P)
+        with prof.section('chunk.planes' if solve_tilt else 'chunk.medians'):
+            D = overlap_planes(prep, geo, P).reshape(nrow, Nt - 1) if solve_tilt else overlap_medians(prep, P)
         D_all[k] = D
         with prof.section('chunk.acc_R'):
             accumulate(R, np.concatenate([np.zeros((1, D.shape[0])), D.T], axis=0), int(t0), w)
@@ -413,36 +577,52 @@ def denoise_series(cube, topo, engine, dataset_cls, mask=None, N=128, Nt=9, spat
         flat = rhs.reshape(T - 1, -1)
         for b in range(0, flat.shape[1], 20000):
             flat[:, b:b + 20000] = sla.cho_solve(cf, flat[:, b:b + 20000])
-    U = np.zeros((T, H, Wd), np.float32)
-    U[1:] = rhs
-    del rhs, flat
+        U = np.zeros((T, H, Wd), np.float32)
+        U[1:] = rhs
+        del rhs, flat
 
-    # offsets
-    with prof.section('solve.factor'):
-        fs = factor_system(A, a, M)
-    with prof.section('solve.offsets'):
-        E = solve_offsets(A, a, R.T, fs)
-        info = dict(n_tiles=W, n_windows=W, n_pairs=len(prep['pairs']), t_starts=t_starts, n_null_modes=fs['n_null'],
-                    velocity_mode=velocity_mode)
-        info['rms_before'], info['rms_after'] = offset_residual(A, E, D_all, t_starts, Nt, a, w)
-
+    info = dict(n_tiles=W, n_windows=W, n_pairs=P_, t_starts=t_starts, velocity_mode=velocity_mode,
+                solve_tilt=bool(solve_tilt), fit_plane=bool(fit_plane))
     g = None
     if velocity_mode != 'none':
         dates = np.asarray(dates, float)
         g = regression_weights(dates)
-    if velocity_mode == 'before':
-        with prof.section('velocity.before'):
-            v_base = trend(U, g)
-            Q, qstar, ns = velocity_constraint(prep, v_base, velocity, velocity_order, velocity_subsample)
-            E = constrained_offsets(E, fs, g[1:], Q, qstar, velocity_weight)
-            info['rms_after_constrained'] = offset_residual(A, E, D_all, t_starts, Nt, a, w)[1]
-            info['velocity_samples'] = ns
-    with prof.section('assemble.interp'):
-        interp_offsets(prep, E, U)
+
+    if solve_tilt:
+        with prof.section('solve.tilt'):
+            ft = factor_tilt(A3, ws, M, tilt_prior)
+            Theta = solve_tilt_system(A3, ws, R.T, ft)
+            info['rms_before'], info['rms_after'] = tilt_residual(A3, Theta, D_all, t_starts, Nt, ws, w)
+            Theta = Theta.reshape(W, 3, T - 1)
+            E = Theta[:, 0, :]
+            info['tilt'] = Theta[:, 1:, :]
+            info['n_null_modes'] = 3
+        with prof.section('assemble.interp'):
+            interp_offsets_tilt(prep, Theta, U)
+    else:
+        with prof.section('solve.factor'):
+            fs = factor_system(A, a, M)
+        with prof.section('solve.offsets'):
+            E = solve_offsets(A, a, R.T, fs)
+            info['n_null_modes'] = fs['n_null']
+            info['rms_before'], info['rms_after'] = offset_residual(A, E, D_all, t_starts, Nt, a, w)
+        if velocity_mode == 'before':
+            with prof.section('velocity.before'):
+                v_base = trend(U, g)
+                Q, qstar, ns = velocity_constraint(prep, v_base, velocity, velocity_order, velocity_subsample)
+                E = constrained_offsets(E, fs, g[1:], Q, qstar, velocity_weight)
+                info['rms_after_constrained'] = offset_residual(A, E, D_all, t_starts, Nt, a, w)[1]
+                info['velocity_samples'] = ns
+        with prof.section('assemble.interp'):
+            interp_offsets(prep, E, U)
+
     if velocity_mode == 'after':
         with prof.section('velocity.after'):
             info['velocity_correction'] = detrend_after(prep, U, g, dates, velocity,
                                                         velocity_order, velocity_subsample)
+    if fit_plane:
+        with prof.section('plane.fit'):
+            info['plane_coeffs'] = fit_plane_epochs(prep, U, plane_order, plane_subsample)
     if velocity_mode != 'none':
         info['velocity_misfit_final'] = velocity_misfit(prep, U, g, velocity, velocity_order,
                                                         velocity_subsample)

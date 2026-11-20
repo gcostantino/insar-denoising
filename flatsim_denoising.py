@@ -24,7 +24,8 @@ WVL, RMS_THRESH, ABS_THRESH, POSITIVE_AWAY = 55.5, 10., 300., True  # abs thresh
 UNIT_SCALE = 0.1  # mm -> cm (InSARDenoiser units)
 
 DENOISE_CFG = dict(N=128, Nt=9, spatial_stride=64, t_stride=2, edge_trim=8,
-                   velocity_mode='after', velocity_order=1, velocity_weight=float('inf'))
+                   velocity_mode='after', velocity_order=1, velocity_weight=float('inf'),
+                   solve_tilt=False, tilt_prior=0.0, fit_plane=False, plane_order=1)
 
 
 def _ds(f, name, arr, chunks=None):
@@ -46,7 +47,6 @@ def save_series(h5path, data, U, cfg, info, runtime_s):
             _ds(f, name, src, chunks=c2)
         _ds(f, 'mask', data['mask'].astype(np.uint8), chunks=c2)
         _ds(f, 'los', data['los'], chunks=(min(ny, 128), min(nx, 128), 3))
-
         f['displacement'].attrs['units'] = 'mm'
         f['displacement'].attrs['reference'] = 'zero at dates[0]; positive away from satellite' \
             if data['meta']['positive_away'] else 'zero at dates[0]; positive toward satellite'
@@ -54,21 +54,27 @@ def save_series(h5path, data, U, cfg, info, runtime_s):
         f['los'].attrs['bands'] = 'E, N, U components of the LOS unit vector (sign-adjusted)'
         for k, v in data['meta'].items():
             f.attrs[k] = v
-
         for k in ('N', 'Nt', 'spatial_stride', 't_stride', 'edge_trim',
-                  'velocity_mode', 'velocity_order', 'velocity_weight'):
+                  'velocity_mode', 'velocity_order', 'velocity_weight',
+                  'solve_tilt', 'tilt_prior', 'fit_plane', 'plane_order'):
             v = cfg[k]
             f.attrs[f'cfg_{k}'] = int(v) if isinstance(v, bool) else v
 
-            if data.get('velocity') is not None and 'velocity' not in f:
-                _ds(f, 'velocity', data['velocity'], chunks=c2)  # mm/yr, FLATSIM mean velocity
-
-            for k in ('rms_before', 'rms_after', 'rms_after_constrained'):
-                if k in info: f.attrs[k] = info[k]
-            if 'velocity_misfit_final' in info: f.attrs['velocity_misfit_final'] = info['velocity_misfit_final']
+        if data.get('velocity') is not None and 'velocity' not in f:
+            _ds(f, 'velocity', data['velocity'], chunks=c2)  # mm/yr, FLATSIM mean velocity
+        for k in ('rms_before', 'rms_after', 'rms_after_constrained'):
+            if k in info:
+                f.attrs[k] = info[k]
+        if 'velocity_misfit_final' in info:
+            f.attrs['velocity_misfit_final'] = info['velocity_misfit_final']
+        if info.get('plane_coeffs') is not None:
+            ds = f.create_dataset('plane_removed', data=info['plane_coeffs'])
+            ds.attrs['columns'] = 'u (range), v (azimuth)' + (', u^2, uv, v^2' if cfg['plane_order'] >= 2 else '')
+            ds.attrs['units'] = 'mm per unit of normalised coordinate (-1..1 over the frame), one row per epoch'
+        if info.get('tilt') is not None:
+            f.attrs['tilt_rms_mm_per_half_tile'] = float(np.sqrt(np.mean(info['tilt'] ** 2)))
 
         f.attrs['weights'] = str(denoiser_configuration.model.weight_load_path)
-
         f.attrs['denoiser_cfg'] = json.dumps(cfg, default=str)
         f.attrs['denoiser_unit_scale'] = UNIT_SCALE
         f.attrs['n_windows_per_chunk'] = info['n_windows']
@@ -102,7 +108,6 @@ def process_series(line, base_dir, out_dir, engine, dataset_cls, cfg=DENOISE_CFG
     with prof.section('load'):
         data = load_flatsim(base_dir, line, rms_thresh=RMS_THRESH, abs_thresh_mm=ABS_THRESH,
                             wavelength_mm=WVL, positive_away=POSITIVE_AWAY, with_velocity=use_vel)
-
     vel = data['velocity']
     if use_vel:
         s = velocity_sanity(data['cube'], yyyymmdd_to_years(data['dates']), vel)
@@ -111,10 +116,8 @@ def process_series(line, base_dir, out_dir, engine, dataset_cls, cfg=DENOISE_CFG
 
     if data['cube'].shape[0] < cfg['Nt']:
         return f'too short ({data["cube"].shape[0]} frames)'
-
     log(f'loaded in {time.time() - t0:.0f}s: cube {data["cube"].shape} '
         f'({data["cube"].nbytes / 1e9:.1f} GB), orbit {data["meta"]["orbit"]}')
-
     data['velocity'] = vel
     data['cube'] *= UNIT_SCALE  # mm to cm, as InSARDenoiser wants cm
     with prof.section('denoise'):
@@ -123,7 +126,9 @@ def process_series(line, base_dir, out_dir, engine, dataset_cls, cfg=DENOISE_CFG
                                  velocity=None if vel is None else vel * UNIT_SCALE,
                                  dates=yyyymmdd_to_years(data['dates']), **cfg)
     U /= UNIT_SCALE  # back to mm, so the saved units attribute stays correct
-
+    for k in ('plane_coeffs', 'tilt'):  # diagnostics are in cm inside denoise_series
+        if info.get(k) is not None:
+            info[k] = info[k] / UNIT_SCALE
     info['profile'] = prof.as_dict()
     log(f'saving {h5path}')
     with prof.section('save'):
@@ -146,7 +151,6 @@ def build_master(out_dir, master_path):
 # example with 2 devices:
 # CUDA_VISIBLE_DEVICES=0 python flatsim_denoising.py --out-dir results --shard 0/2 &
 # CUDA_VISIBLE_DEVICES=1 python flatsim_denoising.py --out-dir results --shard 1/2 &
-# wait
 
 if __name__ == '__main__':
     ap = argparse.ArgumentParser()
@@ -159,9 +163,9 @@ if __name__ == '__main__':
     ap.add_argument('--overwrite', action='store_true')
     ap.add_argument('--spatial-stride', type=int, default=128)
     ap.add_argument('--temporal-stride', type=int, default=8)
-    #ap.add_argument('--stat', choices=['mean', 'median'], default='median')
-    #ap.add_argument('--spatial-taper', choices=['hann', 'none'], default='hann', help='spatial taper')
-    #ap.add_argument('--temporal-taper', choices=['hann', 'uniform'], default='hann')
+    # ap.add_argument('--stat', choices=['mean', 'median'], default='median')
+    # ap.add_argument('--spatial-taper', choices=['hann', 'none'], default='hann', help='spatial taper')
+    # ap.add_argument('--temporal-taper', choices=['hann', 'uniform'], default='hann')
     ap.add_argument('--batch-windows', type=int, default=2048, help='batch windows')
     ap.add_argument('--batch-size-gpu', type=int, default=128, help='batch size of GPU')
     ap.add_argument('--inference-silent', action='store_true')
@@ -169,10 +173,18 @@ if __name__ == '__main__':
     ap.add_argument('--profile-memory', action='store_true', help='also log RSS per section')
     ap.add_argument('--log-level', default='INFO', choices=['DEBUG', 'INFO', 'WARNING'])
     ap.add_argument('--log-file', default=None)
-
     ap.add_argument('--velocity-mode', choices=['none', 'before', 'after'], default='after')
     ap.add_argument('--velocity-order', type=int, choices=[1, 2], default=1)
     ap.add_argument('--velocity-weight', type=float, default=float('inf'))
+    ap.add_argument('--solve-tilt', action='store_true',
+                    help='also invert for a tilt (gy, gx) per tile and epoch, not only the offset '
+                         "(not available with --velocity-mode before)")
+    ap.add_argument('--tilt-prior', type=float, default=0.0,
+                    help='weak ridge on the tilts (0 = none), relative to the mean offset weight')
+    ap.add_argument('--fit-plane', action='store_true',
+                    help='after the whole reconstruction, fit a plane to every epoch and remove its gradients')
+    ap.add_argument('--plane-order', type=int, choices=[1, 2], default=1,
+                    help='order of the per-epoch polynomial of --fit-plane (1 = plane, 2 = quadratic)')
 
     a = ap.parse_args()
 
@@ -182,10 +194,14 @@ if __name__ == '__main__':
     batch_windows = a.batch_windows
     logging.getLogger('kito.engine').setLevel(logging.WARNING)  # suppress InSARDenoiser prediction logs
 
+    if a.solve_tilt and a.velocity_mode == 'before':
+        ap.error("--solve-tilt is not available with --velocity-mode before (use 'after' and/or --fit-plane)")
+
     cfg = dict(DENOISE_CFG)
     cfg.update(spatial_stride=a.spatial_stride, t_stride=a.temporal_stride, batch_windows=batch_windows,
                velocity_mode=a.velocity_mode, velocity_order=a.velocity_order,
-               velocity_weight=a.velocity_weight)
+               velocity_weight=a.velocity_weight, solve_tilt=a.solve_tilt, tilt_prior=a.tilt_prior,
+               fit_plane=a.fit_plane, plane_order=a.plane_order)
 
     # max_stride = int(0.75 * (cfg['N'] - 2 * cfg['edge_trim']))  # 84 with defaults
     max_stride = 120  # 84 with defaults
@@ -197,6 +213,10 @@ if __name__ == '__main__':
         tag = tag + f'_vel_corr_{a.velocity_mode}_ord_{a.velocity_order}'
     else:
         tag = tag + f'_no_vel_corr'
+    if a.solve_tilt:
+        tag = tag + '_solvetilt' + (f'{a.tilt_prior:g}' if a.tilt_prior > 0 else '')
+    if a.fit_plane:
+        tag = tag + f'_fitplane{a.plane_order}'
     out_dir = os.path.join(a.out_dir, tag)
 
     inference_verbose = not a.inference_silent
@@ -218,7 +238,6 @@ if __name__ == '__main__':
 
     i, n = map(int, a.shard.split('/'))
     # lines = [l.strip() for l in open(a.list) if l.strip()][i::n]
-
     raw_lines = [l.strip() for l in open(a.list) if l.strip()]
     aux_lines = [l for l in raw_lines if 'NSBAS_DAUX-PKG' in l]
     ts_lines = list(dict.fromkeys(l for l in raw_lines if 'NSBAS_DAUX-PKG' not in l))
