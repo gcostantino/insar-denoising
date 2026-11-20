@@ -1,7 +1,7 @@
 #!/usr/bin/env python
-"""Long-wavelength check of one frame at a time: raw FLATSIM, reconstruction, re-aligned frame (last - first, mm).
+"""Long-wavelength check of every frame: raw FLATSIM, reconstruction, re-aligned frame (last - first, mm).
 
-For every frame given in --frames, a 2x3 figure:
+For each frame, a 2x3 figure:
   row 1: maps   [1] raw FLATSIM cube (same masks / thresholds as the denoiser input)
                 [2] reconstruction (denoised series, should be velocity_mode = none, the 'rawest' version)
                 [3] re-aligned frame = [2] - offset_cum_mm of the inter-frame offset solve in the mosaic file
@@ -9,21 +9,28 @@ For every frame given in --frames, a 2x3 figure:
          through the center of the valid-data bounding box, and its two diagonals. Each profile is the median over a
          swath of +- --swath pixels perpendicular to the line. Axes in km (pixel size from the lon/lat of the frame);
          the three profile panels share the y axis.
-Printed: the plane (range, azimuth) gradients of the three maps and of reconstruction - raw (mm per 100 km), the
-offset applied, and the slope / total variation of every profile.
+By default ALL frames of the mosaic file are processed (--frames to select labels, --orbit / --filter to restrict).
+A frame that fails (no reconstruction file, grid mismatch, ...) is reported and skipped; the run continues.
+Outputs in --out-dir: frame_check_<label>.png per frame, summary.csv (one row per frame, written as the run goes) and
+failed.txt. Printed per frame: offset applied, plane (range, azimuth) gradients of the maps and of reconstruction - raw
+(mm per 100 km), slope / peak-to-peak of every profile.
 Note: [3] is [2] minus one constant, so profile shapes in [2] and [3] are identical; the panel shows how large the offset
 is compared with the variation inside the frame.
 
 Orientation: images are drawn as stored (rows = azimuth, downward; columns = range).
 
-python frame_longwave_check.py --frames TIBET-D004SUD TIBET-D004NORD --results-dir results/tag_none \
-    --mosaic slip_mosaic_none.h5 --base-dir /data/FLATSIM --out-dir checks
+python frame_longwave_check.py --results-dir results/tag_none --mosaic slip_mosaic_none.h5 --base-dir /data/FLATSIM
+python frame_longwave_check.py --frames TIBET-D004SUD TIBET-D004NORD --results-dir ... --mosaic ... --base-dir ...
+python frame_longwave_check.py --orbit descending --filter 'TIBET-D0(04|33)' --skip-existing --results-dir ...
 Run it from the repository root (it imports utils.flatsim_utils.load_flatsim).
 """
 import argparse
+import csv
 import glob
 import os
 import re
+import time
+import traceback
 import warnings
 
 import h5py
@@ -35,6 +42,8 @@ from scipy.ndimage import map_coordinates
 
 LINE_STYLE = {'vertical': 'tab:blue', 'horizontal': 'tab:green', 'diag \\ (top-left > bottom-right)': 'tab:red',
               'diag / (bottom-left > top-right)': 'tab:orange'}
+LINE_SHORT = {'vertical': 'v', 'horizontal': 'h', 'diag \\ (top-left > bottom-right)': 'd1',
+              'diag / (bottom-left > top-right)': 'd2'}
 
 
 def track_label(key):
@@ -47,45 +56,38 @@ def attr_str(v):
 
 
 # ----------------------------------------------------------------------------- locating the inputs
-def find_frame_file(results_dir, label):
-    """Complete .h5 whose track label equals (or, failing that, contains) `label`."""
-    exact, partial = [], []
+def index_results(results_dir):
+    """{key: path} of the complete series found under results_dir (one scan)."""
+    idx = {}
     for p in sorted(glob.glob(os.path.join(results_dir, '**', '*.h5'), recursive=True)):
         if os.path.basename(p).startswith('master'):
             continue
         try:
             with h5py.File(p, 'r') as f:
-                if not bool(f.attrs.get('complete', 0)) or 'key' not in f.attrs:
-                    continue
-                lab = track_label(attr_str(f.attrs['key']))
+                if bool(f.attrs.get('complete', 0)) and 'key' in f.attrs:
+                    idx.setdefault(attr_str(f.attrs['key']), p)
         except OSError:
             continue
-        if lab == label:
-            exact.append(p)
-        elif label in lab:
-            partial.append(p)
-    found = exact or partial
-    if not found:
-        raise SystemExit(f'no complete series for "{label}" in {results_dir}')
-    if len(found) > 1:
-        raise SystemExit(f'"{label}" is ambiguous in {results_dir}: ' + ', '.join(os.path.basename(x) for x in found))
-    return found[0]
+    return idx
 
 
-def mosaic_offsets(mosaic, key):
+def read_mosaic_frames(mosaic):
+    """{key: dict(offsets, orbit, ...)} from the /frames table, plus the mosaic's global attributes."""
     with h5py.File(mosaic, 'r') as f:
         if 'frames' not in f or 'offset_cum_mm' not in f['frames']:
             raise SystemExit(f'{mosaic} has no offsets: build it with --offset-mode rate or full')
         fr = f['frames']
         keys = [attr_str(x) for x in fr['key'][...]]
-        if key not in keys:
-            raise SystemExit(f'frame {key} is not in {mosaic}')
-        i = keys.index(key)
-        out = {n: fr[n][i] for n in ('offset_cum_mm', 'offset_rate_mm_yr', 'offset_det_mm', 'offset_group',
-                                     'offset_is_reference', 'offset_n_pairs', 'span_yr') if n in fr}
-        out['n_avg'] = f.attrs.get('n_avg', np.nan)
-        out['offset_mode'] = attr_str(f.attrs.get('offset_mode', '?'))
-    return out
+        cols = [n for n in ('offset_cum_mm', 'offset_rate_mm_yr', 'offset_det_mm', 'offset_group',
+                            'offset_is_reference', 'offset_n_pairs', 'span_yr', 'orbit') if n in fr]
+        data = {n: fr[n][...] for n in cols}
+        glob_attrs = dict(n_avg=f.attrs.get('n_avg', np.nan), offset_mode=attr_str(f.attrs.get('offset_mode', '?')))
+    table = {}
+    for i, k in enumerate(keys):
+        row = {n: (attr_str(data[n][i]) if n == 'orbit' else data[n][i]) for n in cols}
+        row.update(glob_attrs)
+        table[k] = row
+    return table
 
 
 def end_minus_start(series, n_avg):
@@ -111,9 +113,8 @@ def pixel_size_km(lon, lat, win=200):
 
 # ----------------------------------------------------------------------------- profiles and plane fits
 def valid_bbox(m):
-    rows, cols = np.any(m, axis=1), np.any(m, axis=0)
-    r = np.flatnonzero(rows)
-    c = np.flatnonzero(cols)
+    r = np.flatnonzero(np.any(m, axis=1))
+    c = np.flatnonzero(np.any(m, axis=0))
     return int(r[0]), int(r[-1]), int(c[0]), int(c[-1])
 
 
@@ -130,8 +131,7 @@ def swath_profile(img, a, b, half_width, dx, dy, min_frac=0.3):
     """Median over +- half_width pixels perpendicular to the line a->b; returns distance (km) and profile."""
     (ra, ca), (rb, cb) = a, b
     dr, dc = rb - ra, cb - ca
-    npx = max(abs(dr), abs(dc))
-    n = int(np.ceil(npx)) + 1
+    n = int(np.ceil(max(abs(dr), abs(dc)))) + 1
     s = np.linspace(0, 1, n)
     rows, cols = ra + dr * s, ca + dc * s
     nrm = np.hypot(dr, dc)
@@ -145,12 +145,11 @@ def swath_profile(img, a, b, half_width, dx, dy, min_frac=0.3):
         warnings.simplefilter('ignore', RuntimeWarning)
         prof = np.nanmedian(vals, axis=0)
     prof[ok.mean(axis=0) < min_frac] = np.nan
-    length = np.hypot(dr * dy, dc * dx)
-    return s * length, prof
+    return s * np.hypot(dr * dy, dc * dx), prof
 
 
 def plane_gradients(img, dx, dy, max_pts=300_000, seed=0):
-    """Least-squares plane z = a + gr*x + ga*y (x = range km, y = azimuth km); returns gradients in mm per 100 km."""
+    """Least-squares plane z = a + gr*x + ga*y (x = range km, y = azimuth km); gradients in mm per 100 km."""
     rr, cc = np.nonzero(np.isfinite(img))
     if len(rr) < 100:
         return np.nan, np.nan
@@ -170,9 +169,8 @@ def line_slope(x, y):
     return float(np.polyfit(x[m], y[m], 1)[0] * 100), float(np.ptp(y[m]))
 
 
-# ----------------------------------------------------------------------------- figure
+# ----------------------------------------------------------------------------- figure and report
 def make_figure(label, maps, titles, dx, dy, bbox, half_width, vlim, demean, header):
-    """maps: list of three (ny, nx) arrays [raw, reconstruction, re-aligned]."""
     ny, nx = maps[0].shape
     shown = [m - np.nanmedian(m) for m in maps] if demean else maps
     fig = plt.figure(figsize=(19, 10))
@@ -180,19 +178,18 @@ def make_figure(label, maps, titles, dx, dy, bbox, half_width, vlim, demean, hea
     norm, cmap = Normalize(-vlim, vlim), plt.get_cmap('RdBu_r')
     lines = make_lines(bbox)
     axm = [fig.add_subplot(gs[0, j]) for j in range(3)]
-    axp = [fig.add_subplot(gs[1, j], sharey=None) for j in range(3)]
+    axp = [fig.add_subplot(gs[1, j]) for j in range(3)]
     ylo, yhi = np.inf, -np.inf
     profiles = {}
     for j in range(3):
-        ax = axm[j]
-        ax.imshow(shown[j], extent=[0, nx * dx, ny * dy, 0], cmap=cmap, norm=norm, interpolation='nearest',
-                  aspect='equal')
-        ax.set_title(titles[j], fontsize=10)
-        ax.set_xlabel('range (km)')
+        axm[j].imshow(shown[j], extent=[0, nx * dx, ny * dy, 0], cmap=cmap, norm=norm, interpolation='nearest',
+                      aspect='equal')
+        axm[j].set_title(titles[j], fontsize=10)
+        axm[j].set_xlabel('range (km)')
         if j == 0:
-            ax.set_ylabel('azimuth (km)')
+            axm[j].set_ylabel('azimuth (km)')
         for name, (a, b) in lines.items():
-            ax.plot([a[1] * dx, b[1] * dx], [a[0] * dy, b[0] * dy], color=LINE_STYLE[name], lw=1.2)
+            axm[j].plot([a[1] * dx, b[1] * dx], [a[0] * dy, b[0] * dy], color=LINE_STYLE[name], lw=1.2)
             x, p = swath_profile(shown[j], a, b, half_width, dx, dy)
             profiles[(j, name)] = (x, p)
             axp[j].plot(x, p, color=LINE_STYLE[name], lw=1.3, label=name)
@@ -239,9 +236,69 @@ def report(label, maps, names, dx, dy, profiles, off):
         print(f'   {name:<36}' + ''.join(f'{c:>20}' for c in cells))
 
 
+# ----------------------------------------------------------------------------- one frame
+def process_frame(key, path, off, a, load_flatsim):
+    label = track_label(key)
+    with h5py.File(path, 'r') as f:
+        mode = attr_str(f.attrs.get('cfg_velocity_mode', 'none'))
+        if mode != 'none':
+            print(f'WARNING {label}: reconstruction was run with velocity_mode={mode}, not the rawest version')
+        recon = end_minus_start(f['displacement'], a.n_avg)
+        lon, lat = f['lon'][...], f['lat'][...]
+        kw = dict(rms_thresh=float(f.attrs.get('rms_thresh', 10.)), abs_thresh_mm=float(f.attrs.get('abs_thresh', 300.)),
+                  wavelength_mm=float(f.attrs.get('wvl_mm', 55.5)), positive_away=bool(f.attrs.get('positive_away', True)))
+    data = load_flatsim(a.base_dir, key, **kw)
+    raw = end_minus_start(data['cube'], a.n_avg)
+    del data
+    if raw.shape != recon.shape:
+        raise ValueError(f'raw {raw.shape} and reconstruction {recon.shape} grids differ')
+    if np.isfinite(off['n_avg']) and int(off['n_avg']) != a.n_avg:
+        print(f'WARNING {label}: the mosaic was built with n_avg={int(off["n_avg"])}, this run uses {a.n_avg}')
+    if a.mask_recon:
+        recon[~np.isfinite(raw)] = np.nan
+    aligned = recon - np.float32(off['offset_cum_mm'])
+    maps = [raw, recon, aligned]
+    valid = np.isfinite(raw) if np.isfinite(raw).any() else np.isfinite(recon)
+    if not valid.any():
+        raise ValueError('no valid pixel')
+    bbox = valid_bbox(valid)
+    dx, dy = pixel_size_km(lon, lat)
+    vlim = a.vlim or float(np.nanpercentile(np.abs(recon[np.isfinite(recon)]), 98))
+    titles = ['[1] raw FLATSIM', f'[2] reconstruction (velocity {mode})',
+              f'[3] re-aligned ({-off["offset_cum_mm"]:+.1f} mm, {off["offset_mode"]} offsets)']
+    header = (f'last - first (n_avg={a.n_avg}) | span {float(off.get("span_yr", np.nan)):.2f} yr | '
+              f'valid bbox rows {bbox[0]}-{bbox[1]}, cols {bbox[2]}-{bbox[3]}')
+    fig, profiles = make_figure(label, maps, titles, dx, dy, bbox, a.swath, vlim, a.demean, header)
+    report(label, maps, ['[1] raw', '[2] reconstruction', '[3] re-aligned'], dx, dy, profiles, off)
+    out = os.path.join(a.out_dir, f'frame_check_{label}.png')
+    fig.savefig(out, dpi=a.dpi, bbox_inches='tight')
+    print('saved', out)
+    if a.show:
+        plt.show()
+    plt.close(fig)
+
+    row = dict(label=label, key=key, orbit=off.get('orbit', ''), offset_cum_mm=float(off['offset_cum_mm']),
+               offset_rate_mm_yr=float(off.get('offset_rate_mm_yr', np.nan)),
+               offset_det_mm=float(off.get('offset_det_mm', np.nan)), group=int(off.get('offset_group', -1)),
+               is_reference=int(off.get('offset_is_reference', 0)), n_pairs=int(off.get('offset_n_pairs', 0)),
+               span_yr=float(off.get('span_yr', np.nan)), dx_km=dx, dy_km=dy)
+    for nme, m in (('raw', raw), ('recon', recon)):
+        gr, ga = plane_gradients(m, dx, dy)
+        row[f'grad_range_{nme}'], row[f'grad_az_{nme}'] = gr, ga
+    gr, ga = plane_gradients(recon - raw, dx, dy)
+    row.update(grad_range_diff=gr, grad_az_diff=ga, mean_diff_mm=float(np.nanmean(recon - raw)))
+    for name, short in LINE_SHORT.items():
+        row[f'slope_{short}_raw'] = line_slope(*profiles[(0, name)])[0]
+        row[f'slope_{short}_recon'] = line_slope(*profiles[(1, name)])[0]
+    return row
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('--frames', nargs='+', required=True, help='track labels, e.g. TIBET-D004SUD')
+    ap.add_argument('--frames', nargs='+', default=['all'],
+                    help='track labels (e.g. TIBET-D004SUD, exact or substring) or "all" (default)')
+    ap.add_argument('--orbit', choices=['ascending', 'descending', 'both'], default='both')
+    ap.add_argument('--filter', default=None, help='regular expression the track label must match')
     ap.add_argument('--results-dir', required=True, help='folder with the reconstructions (velocity_mode none)')
     ap.add_argument('--mosaic', required=True, help='mosaic .h5 built from those reconstructions (offset-mode rate|full)')
     ap.add_argument('--base-dir', required=True, help='FLATSIM base directory (for the raw cube)')
@@ -250,6 +307,7 @@ def main():
     ap.add_argument('--vlim', type=float, default=None, help='symmetric colour limit (default: 98th percentile of |[2]|)')
     ap.add_argument('--mask-recon', action='store_true', help='hide the reconstruction where the raw data are NaN')
     ap.add_argument('--demean', action='store_true', help='subtract the median of each map (maps and profiles)')
+    ap.add_argument('--skip-existing', action='store_true', help='skip frames whose PNG already exists')
     ap.add_argument('--out-dir', default='.')
     ap.add_argument('--dpi', type=int, default=150)
     ap.add_argument('--show', action='store_true')
@@ -260,46 +318,66 @@ def main():
         raise SystemExit(f'cannot import utils.flatsim_utils.load_flatsim ({e}); run from the repository root')
     os.makedirs(a.out_dir, exist_ok=True)
 
-    for label in a.frames:
-        path = find_frame_file(a.results_dir, label)
-        with h5py.File(path, 'r') as f:
-            key = attr_str(f.attrs['key'])
-            mode = attr_str(f.attrs.get('cfg_velocity_mode', 'none'))
-            if mode != 'none':
-                print(f'WARNING {label}: reconstruction was run with velocity_mode={mode}, not the rawest version')
-            U = f['displacement']
-            recon = end_minus_start(U, a.n_avg)
-            lon, lat = f['lon'][...], f['lat'][...]
-            kw = dict(rms_thresh=float(f.attrs.get('rms_thresh', 10.)), abs_thresh_mm=float(f.attrs.get('abs_thresh', 300.)),
-                      wavelength_mm=float(f.attrs.get('wvl_mm', 55.5)), positive_away=bool(f.attrs.get('positive_away', True)))
-        data = load_flatsim(a.base_dir, key, **kw)
-        raw = end_minus_start(data['cube'], a.n_avg)
-        del data
-        if raw.shape != recon.shape:
-            raise SystemExit(f'{label}: raw {raw.shape} and reconstruction {recon.shape} grids differ')
-        off = mosaic_offsets(a.mosaic, key)
-        if np.isfinite(off['n_avg']) and int(off['n_avg']) != a.n_avg:
-            print(f'WARNING {label}: the mosaic was built with n_avg={int(off["n_avg"])}, this run uses {a.n_avg}')
-        if a.mask_recon:
-            recon[~np.isfinite(raw)] = np.nan
-        aligned = recon - np.float32(off['offset_cum_mm'])
-        maps = [raw, recon, aligned]
-        valid = np.isfinite(raw) if np.isfinite(raw).any() else np.isfinite(recon)
-        bbox = valid_bbox(valid)
-        dx, dy = pixel_size_km(lon, lat)
-        vlim = a.vlim or float(np.nanpercentile(np.abs(recon[np.isfinite(recon)]), 98))
-        titles = ['[1] raw FLATSIM', f'[2] reconstruction (velocity {mode})',
-                  f'[3] re-aligned ({-off["offset_cum_mm"]:+.1f} mm, {off["offset_mode"]} offsets)']
-        header = (f'last - first (n_avg={a.n_avg}) | span {float(off.get("span_yr", np.nan)):.2f} yr | '
-                  f'valid bbox rows {bbox[0]}-{bbox[1]}, cols {bbox[2]}-{bbox[3]}')
-        fig, profiles = make_figure(label, maps, titles, dx, dy, bbox, a.swath, vlim, a.demean, header)
-        report(label, maps, ['[1] raw', '[2] reconstruction', '[3] re-aligned'], dx, dy, profiles, off)
-        out = os.path.join(a.out_dir, f'frame_check_{label}.png')
-        fig.savefig(out, dpi=a.dpi, bbox_inches='tight')
-        print('saved', out)
-        if a.show:
-            plt.show()
-        plt.close(fig)
+    table = read_mosaic_frames(a.mosaic)
+    keys = list(table)
+    if a.frames != ['all']:
+        sel = []
+        for lab in a.frames:
+            exact = [k for k in keys if track_label(k) == lab]
+            part = [k for k in keys if lab in track_label(k)]
+            found = exact or part
+            if not found:
+                print(f'no frame matches "{lab}" in {a.mosaic}')
+            sel += [k for k in found if k not in sel]
+        keys = sel
+    if a.orbit != 'both':
+        keys = [k for k in keys if table[k].get('orbit', '') == a.orbit]
+    if a.filter:
+        keys = [k for k in keys if re.search(a.filter, track_label(k))]
+    if not keys:
+        raise SystemExit('no frame selected')
+    print(f'{len(keys)} frame(s) selected; scanning {a.results_dir} ...')
+    index = index_results(a.results_dir)
+
+    csv_path = os.path.join(a.out_dir, 'summary.csv')
+    writer, fh = None, None
+    failed, n_ok, t0 = [], 0, time.time()
+    for n, key in enumerate(keys, 1):
+        label = track_label(key)
+        print(f'\n[{n}/{len(keys)}] {label}', flush=True)
+        if a.skip_existing and os.path.exists(os.path.join(a.out_dir, f'frame_check_{label}.png')):
+            print(' skipped (PNG exists)')
+            continue
+        try:
+            if key not in index:
+                raise FileNotFoundError(f'no complete reconstruction for {key} under {a.results_dir}')
+            row = process_frame(key, index[key], table[key], a, load_flatsim)
+        except KeyboardInterrupt:
+            raise
+        except Exception as e:
+            failed.append((label, f'{type(e).__name__}: {e}'))
+            print(f' FAILED: {type(e).__name__}: {e}')
+            if not isinstance(e, (FileNotFoundError, ValueError)):
+                traceback.print_exc()
+            continue
+        n_ok += 1
+        if writer is None:
+            fh = open(csv_path, 'w', newline='')
+            writer = csv.DictWriter(fh, fieldnames=list(row))
+            writer.writeheader()
+        writer.writerow(row)
+        fh.flush()
+        el = time.time() - t0
+        print(f' done ({el / 60:.1f} min elapsed, ETA {el / n * (len(keys) - n) / 60:.1f} min)')
+    if fh:
+        fh.close()
+    if failed:
+        with open(os.path.join(a.out_dir, 'failed.txt'), 'w') as ff:
+            for lab, msg in failed:
+                ff.write(f'{lab}\t{msg}\n')
+    print(f'\n{n_ok} frame(s) done, {len(failed)} failed'
+          + (f' (see {os.path.join(a.out_dir, "failed.txt")})' if failed else '')
+          + (f'; summary in {csv_path}' if n_ok else ''))
 
 
 if __name__ == '__main__':
