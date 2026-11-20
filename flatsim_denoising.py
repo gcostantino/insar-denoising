@@ -20,6 +20,7 @@ from utils.profiling import prof, log, configure, setup_logging
 from utils.space_time_reconstruction import denoise_series, yyyymmdd_to_years
 
 WVL, RMS_THRESH, ABS_THRESH, POSITIVE_AWAY = 55.5, 10., 300., True  # abs thresh, though it should depend on the TS
+EMPTY_MODE = 'mask'
 
 UNIT_SCALE = 0.1  # mm -> cm (InSARDenoiser units)
 
@@ -186,7 +187,7 @@ if __name__ == '__main__':
                     help='after the whole reconstruction, fit a plane to every epoch and remove its gradients')
     ap.add_argument('--plane-order', type=int, choices=[1, 2], default=1,
                     help='order of the per-epoch polynomial of --fit-plane (1 = plane, 2 = quadratic)')
-    ap.add_argument('--empty-mode', choices=['mask', 'noise'], default='mask')
+    ap.add_argument('--empty-mode', choices=['keep', 'mask', 'noise'], default='mask')
 
     a = ap.parse_args()
 
@@ -199,11 +200,13 @@ if __name__ == '__main__':
     if a.solve_tilt and a.velocity_mode == 'before':
         ap.error("--solve-tilt is not available with --velocity-mode before (use 'after' and/or --fit-plane)")
 
+    EMPTY_MODE = a.empty
+
     cfg = dict(DENOISE_CFG)
     cfg.update(spatial_stride=a.spatial_stride, t_stride=a.temporal_stride, batch_windows=batch_windows,
                velocity_mode=a.velocity_mode, velocity_order=a.velocity_order,
                velocity_weight=a.velocity_weight, solve_tilt=a.solve_tilt, tilt_prior=a.tilt_prior,
-               fit_plane=a.fit_plane, plane_order=a.plane_order, empty_mode=a.empty_mode)
+               fit_plane=a.fit_plane, plane_order=a.plane_order, empty_mode=EMPTY_MODE)
 
     # max_stride = int(0.75 * (cfg['N'] - 2 * cfg['edge_trim']))  # 84 with defaults
     max_stride = 120  # 84 with defaults
