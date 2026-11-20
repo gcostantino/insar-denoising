@@ -107,7 +107,8 @@ def process_series(line, base_dir, out_dir, engine, dataset_cls, cfg=DENOISE_CFG
     use_vel = cfg['velocity_mode'] != 'none'
     with prof.section('load'):
         data = load_flatsim(base_dir, line, rms_thresh=RMS_THRESH, abs_thresh_mm=ABS_THRESH,
-                            wavelength_mm=WVL, positive_away=POSITIVE_AWAY, with_velocity=use_vel)
+                            wavelength_mm=WVL, positive_away=POSITIVE_AWAY, with_velocity=use_vel,
+                            empty_mode=cfg['empty_mode'])
     vel = data['velocity']
     if use_vel:
         s = velocity_sanity(data['cube'], yyyymmdd_to_years(data['dates']), vel)
@@ -185,6 +186,7 @@ if __name__ == '__main__':
                     help='after the whole reconstruction, fit a plane to every epoch and remove its gradients')
     ap.add_argument('--plane-order', type=int, choices=[1, 2], default=1,
                     help='order of the per-epoch polynomial of --fit-plane (1 = plane, 2 = quadratic)')
+    ap.add_argument('--empty-mode', choices=['mask', 'noise'], default='mask')
 
     a = ap.parse_args()
 
@@ -201,7 +203,7 @@ if __name__ == '__main__':
     cfg.update(spatial_stride=a.spatial_stride, t_stride=a.temporal_stride, batch_windows=batch_windows,
                velocity_mode=a.velocity_mode, velocity_order=a.velocity_order,
                velocity_weight=a.velocity_weight, solve_tilt=a.solve_tilt, tilt_prior=a.tilt_prior,
-               fit_plane=a.fit_plane, plane_order=a.plane_order)
+               fit_plane=a.fit_plane, plane_order=a.plane_order, empty_mode=a.empty_mode)
 
     # max_stride = int(0.75 * (cfg['N'] - 2 * cfg['edge_trim']))  # 84 with defaults
     max_stride = 120  # 84 with defaults

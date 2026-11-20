@@ -14,6 +14,7 @@ def _find(folder, pattern):
                                 f'folder contains: {sorted(os.listdir(folder))[:30]}')
     return m[0]
 
+
 def _find_any(folder, patterns):
     """Try each pattern in order; return the first that matches exactly one file."""
     if not os.path.isdir(folder):
@@ -26,6 +27,7 @@ def _find_any(folder, patterns):
             return m[0]
     raise FileNotFoundError(f'No unique match in {folder}. Tried: {tried}. '
                             f'Folder contains: {sorted(os.listdir(folder))[:30]}')
+
 
 def _find_first(folders, pattern):
     """Exactly one match for `pattern`, searching the folders in order (time-series folder, then DAUX)."""
@@ -47,19 +49,20 @@ def load_mean_velocity(folders, shape, mask, wavelength_mm, sign):
     """
     velfile = _find_first(folders, 'CNES_MV-LOS_radar_8rlks.tiff')
     v = tifffile.imread(velfile)
-    if v.ndim == 3:                                   # (ny, nx, bands), band 1 = velocity
+    if v.ndim == 3:  # (ny, nx, bands), band 1 = velocity
         v = v[:, :, 0] if v.shape[-1] <= 4 else v[0]
     v = v.astype(np.float32)
     v[v == 9999.] = np.nan
-    v = sign * (wavelength_mm * v) / (4 * np.pi)      # rad/yr -> mm/yr
+    v = sign * (wavelength_mm * v) / (4 * np.pi)  # rad/yr -> mm/yr
     v[~np.isfinite(v)] = np.nan
     if v.shape != tuple(shape):
         raise ValueError(f'velocity grid {v.shape} != cube grid {tuple(shape)} ({velfile})')
     v[mask] = np.nan
     return v, velfile
 
+
 def load_flatsim(base_dir, line, rms_thresh=10., abs_thresh_mm=300., wavelength_mm=55.5, positive_away=True,
-                 with_velocity=False):
+                 with_velocity=False, empty_mode='mask'):
     """line = 'region/NSBAS_TS-PKG_...'. Returns cube (T,ny,nx) in mm + auxiliary data."""
     region, product = os.path.split(line.strip())
     folder = os.path.join(base_dir, region, product)
@@ -101,7 +104,17 @@ def load_flatsim(base_dir, line, rms_thresh=10., abs_thresh_mm=300., wavelength_
     with np.errstate(invalid='ignore'):
         cube[:, rms > rms_thresh] = np.nan
         cube[np.abs(cube) > abs_thresh_mm] = np.nan
+
+    empty = np.ones(cube.shape[1:], bool)
+    for t in range(cube.shape[0]):  # per epoch, no full-cube copy
+        empty &= ~(np.abs(cube[t]) > 0)  # NaN and 0 both give False
+    if empty_mode == 'mask':  # NaN before the mask: masked in the output
+        cube[:, empty] = np.nan
+
     mask = np.isnan(cube).all(axis=0)
+
+    if empty_mode == 'noise':  # NaN after the mask: the mask stays False  --> for testing
+        cube[:, empty & ~mask] = np.nan  # fill_cube_inplace then adds uniform noise
 
     velocity, velfile = None, ''
     if with_velocity:
