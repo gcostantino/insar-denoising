@@ -95,7 +95,8 @@ def is_complete(h5path):
         return False
 
 
-def process_series(line, base_dir, out_dir, engine, dataset_cls, cfg=DENOISE_CFG, overwrite=False, verbose=True):
+def process_series(line, base_dir, out_dir, engine, dataset_cls, cfg=DENOISE_CFG, overwrite=False, verbose=True,
+                   empty_mode='mask'):
     region, product = os.path.split(line.strip())
     if 'NSBAS_DAUX-PKG' in product:
         return 'skipped (auxiliary folder, not a time series)'
@@ -109,7 +110,7 @@ def process_series(line, base_dir, out_dir, engine, dataset_cls, cfg=DENOISE_CFG
     with prof.section('load'):
         data = load_flatsim(base_dir, line, rms_thresh=RMS_THRESH, abs_thresh_mm=ABS_THRESH,
                             wavelength_mm=WVL, positive_away=POSITIVE_AWAY, with_velocity=use_vel,
-                            empty_mode=cfg['empty_mode'])
+                            empty_mode=empty_mode)
     vel = data['velocity']
     if use_vel:
         s = velocity_sanity(data['cube'], yyyymmdd_to_years(data['dates']), vel)
@@ -206,7 +207,7 @@ if __name__ == '__main__':
     cfg.update(spatial_stride=a.spatial_stride, t_stride=a.temporal_stride, batch_windows=batch_windows,
                velocity_mode=a.velocity_mode, velocity_order=a.velocity_order,
                velocity_weight=a.velocity_weight, solve_tilt=a.solve_tilt, tilt_prior=a.tilt_prior,
-               fit_plane=a.fit_plane, plane_order=a.plane_order, empty_mode=EMPTY_MODE)
+               fit_plane=a.fit_plane, plane_order=a.plane_order)
 
     # max_stride = int(0.75 * (cfg['N'] - 2 * cfg['edge_trim']))  # 84 with defaults
     max_stride = 120  # 84 with defaults
