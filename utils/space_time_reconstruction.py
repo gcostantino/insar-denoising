@@ -514,7 +514,8 @@ def denoise_series(cube, topo, engine, dataset_cls, mask=None, N=128, Nt=9, spat
                    fill_range=10., seed=0, batch_windows=2000, verbose=True,
                    velocity=None, dates=None, velocity_mode='none', velocity_order=1,
                    velocity_weight=np.inf, velocity_subsample=4,
-                   solve_tilt=False, tilt_prior=0.0, fit_plane=False, plane_order=1, plane_subsample=4):
+                   solve_tilt=False, tilt_prior=0.0, fit_plane=False, plane_order=1, plane_subsample=4,
+                   fill_all_nan=False):
     """cube: (T,H,W) float32 (modified in place: NaNs filled). Returns U (T,H,W), info.
 
     solve_tilt: also invert for a tilt (gy, gx) per tile and epoch, not only the offset (tilt_prior > 0 adds a weak
@@ -530,6 +531,10 @@ def denoise_series(cube, topo, engine, dataset_cls, mask=None, N=128, Nt=9, spat
         raise ValueError("solve_tilt is not available with velocity_mode='before' (use 'after' and/or fit_plane)")
     if mask is None:
         mask = nan_all(cube)
+    n_nan_all = int(nan_all(cube).sum())
+    if fill_all_nan:
+        mask = np.zeros(cube.shape[1:], bool)  # no window is skipped; all-NaN pixels get noise below
+
     with prof.section('setup.static'):
         prep = prepare_static(topo, mask, N, spatial_stride, edge_trim, min_overlap_frac, min_pixels)
     H, Wd = prep['shape']
@@ -629,4 +634,7 @@ def denoise_series(cube, topo, engine, dataset_cls, mask=None, N=128, Nt=9, spat
     U[:, prep['den'] == 0] = np.nan
     info['E'] = E
     info['origins'] = prep['origins']
+
+    info['n_nan_all_px'] = n_nan_all
+    info['fill_all_nan'] = bool(fill_all_nan)
     return U, info

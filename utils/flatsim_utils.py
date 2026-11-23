@@ -61,6 +61,32 @@ def load_mean_velocity(folders, shape, mask, wavelength_mm, sign):
     return v, velfile
 
 
+def reference_cube(c):
+    """Subtract each pixel's first finite value (in place); returns the index of that epoch (-1 if none)."""
+    first = np.full(c.shape[1:], -1, np.int32)
+    ref = np.zeros(c.shape[1:], np.float32)
+    for t in range(c.shape[0]):
+        m = (first < 0) & np.isfinite(c[t])
+        first[m] = t
+        ref[m] = c[t][m]
+    c -= ref[None]
+    return first
+
+
+def flag_frozen(cube, first, per_epoch=True):
+    """After referencing, epochs equal to the reference value (exact 0) carry no information."""
+    T = cube.shape[0]
+    dead = np.ones(cube.shape[1:], bool)
+    frac = np.zeros(T)
+    for t in range(T):
+        z = (cube[t] == 0) & (first != t)
+        frac[t] = z.mean()
+        if per_epoch:
+            cube[t][z] = np.nan
+        dead &= z | np.isnan(cube[t]) | (first == t)
+    return dead, frac
+
+
 def load_flatsim(base_dir, line, rms_thresh=10., abs_thresh_mm=300., wavelength_mm=55.5, positive_away=True,
                  with_velocity=False, empty_mode='mask'):
     """line = 'region/NSBAS_TS-PKG_...'. Returns cube (T,ny,nx) in mm + auxiliary data."""
@@ -105,16 +131,16 @@ def load_flatsim(base_dir, line, rms_thresh=10., abs_thresh_mm=300., wavelength_
         cube[:, rms > rms_thresh] = np.nan
         cube[np.abs(cube) > abs_thresh_mm] = np.nan
 
-    empty = np.ones(cube.shape[1:], bool)
-    for t in range(cube.shape[0]):  # per epoch, no full-cube copy
-        empty &= ~(np.abs(cube[t]) > 0)  # NaN and 0 both give False
-    if empty_mode == 'mask':  # NaN before the mask: masked in the output
-        cube[:, empty] = np.nan
-
+    first = reference_cube(cube)  # subtract each pixel's first finite epoch
+    empty = np.zeros(cube.shape[1:], bool)
+    if empty_mode != 'keep':
+        empty, _ = flag_frozen(cube, first)
+        if empty_mode == 'mask':
+            r, k = np.nonzero(empty & (first >= 0))
+            cube[first[r, k], r, k] = np.nan  # reference epoch too: all-NaN, so masked
     mask = np.isnan(cube).all(axis=0)
-
-    if empty_mode == 'noise':  # NaN after the mask: the mask stays False  --> for testing
-        cube[:, empty & ~mask] = np.nan  # fill_cube_inplace then adds uniform noise
+    if empty_mode == 'noise':  # mask stays False; fill_cube_inplace adds the noise
+        cube[:, empty & ~mask] = np.nan
 
     velocity, velfile = None, ''
     if with_velocity:
