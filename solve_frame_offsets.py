@@ -182,6 +182,9 @@ def solve_epoch(n, a, b, obs, w, ref):
 
 # ----------------------------------------------------------------------------- main
 def collect_files(a):
+    excl = list(a.exclude)
+    if a.exclude_file:
+        excl += [l.strip() for l in open(a.exclude_file) if l.strip() and not l.lstrip().startswith('#')]
     files = list(a.files)
     if a.results_dir:
         for p in sorted(glob.glob(os.path.join(a.results_dir, '**', '*.h5'), recursive=True)):
@@ -191,6 +194,9 @@ def collect_files(a):
                 files.append(p)
     out = []
     for p in dict.fromkeys(files):
+        if any(x in p for x in excl):
+            log(f'excluded: {os.path.basename(p)}')
+            continue
         try:
             with h5py.File(p, 'r') as f:
                 if bool(f.attrs.get('complete', 1)):
@@ -223,6 +229,11 @@ def main():
     ap.add_argument('files', nargs='*')
     ap.add_argument('--results-dir', default=None)
     ap.add_argument('--match', nargs='+', default=None, help='keep paths containing any of these strings')
+    ap.add_argument('--exclude', nargs='+', default=[],
+                    help='drop series whose path contains any of these strings (e.g. TIBET-D135NORD TIBET-D004)')
+    ap.add_argument('--exclude-file', default=None,
+                    help='text file with one string per line (# for comments), same meaning as --exclude')
+
     ap.add_argument('--out', default='frame_offsets.h5')
     ap.add_argument('--step-days', type=float, default=12.0, help='common time grid')
     ap.add_argument('--ref-track', nargs='+', default=None, help='track labels (substring) of the reference frames')
