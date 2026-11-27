@@ -142,6 +142,7 @@ def main():
     ap.add_argument('--keep-unreferenced', action='store_true', help='cells without data in the reference period stay as they are')
     ap.add_argument('--limit-tiles', type=int, default=None, help='testing')
     ap.add_argument('--dry-run', action='store_true')
+    ap.add_argument('--region', nargs='+', default=None, help='keep only frames of these regions (as in the frames table)')
     a = ap.parse_args()
 
     fr, grid, e, res = read_offsets(a.offsets)
@@ -157,7 +158,10 @@ def main():
             raise SystemExit('no grid date in the reference period')
     orbits = ['ascending', 'descending'] if a.orbit == 'both' else [a.orbit]
     for orbit in orbits:
+        #fidx = [k for k in range(len(fr['key'])) if fr['orbit'][k] == orbit
+        #        and not any(s in fr['label'][k] for s in a.exclude)]
         fidx = [k for k in range(len(fr['key'])) if fr['orbit'][k] == orbit
+                and (not a.region or fr['region'][k] in a.region)
                 and not any(s in fr['label'][k] for s in a.exclude)]
         if not fidx:
             continue
