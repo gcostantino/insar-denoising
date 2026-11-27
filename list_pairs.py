@@ -11,10 +11,10 @@ with h5py.File(mosaic, 'r') as f:
         raise SystemExit('no /pairs: rebuild with --offset-mode rate or cumulative')
     fr = {k: dec(f['frames'][k][...]) for k in ('key', 'path', 'orbit')}
     p = f['pairs']
-    fi, fj, n, win = (p[k][...] for k in ('frame_i', 'frame_j', 'n_cells', 'window_yr'))
+    fi, fj, n = (p[k][...] for k in ('frame_i', 'frame_j', 'n_cells'))
 
-for n_, i, j, w in sorted(zip(n, fi, fj, win), key=lambda r: -r[0]):
+for n_, i, j in sorted(zip(n, fi, fj), key=lambda r: -r[0]):
     a, b = fr['key'][i], fr['key'][j]
     if all(s in a + ' ' + b for s in flt):
-        print(f'{n_:9d} cells  {w:5.2f} yr  {fr["orbit"][i][:4]}  {a}  |  {b}')
+        print(f'{n_:9d} cells {fr["orbit"][i][:4]}  {a}  |  {b}')
         print(f'    python overlap_diff_series.py "{fr["path"][i]}" "{fr["path"][j]}"')
