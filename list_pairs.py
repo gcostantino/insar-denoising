@@ -17,4 +17,4 @@ for n_, i, j in sorted(zip(n, fi, fj), key=lambda r: -r[0]):
     a, b = fr['key'][i], fr['key'][j]
     if all(s in a + ' ' + b for s in flt):
         print(f'{n_:9d} cells {fr["orbit"][i][:4]}  {a}  |  {b}')
-        print(f'    python overlap_diff_series.py "{fr["path"][i]}" "{fr["path"][j]}"')
+        #print(f'    python overlap_diff_series.py "{fr["path"][i]}" "{fr["path"][j]}"')
